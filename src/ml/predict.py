@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import timedelta
 
-from src.ml.data import load_price_history
+from src.ml.data import load_price_history, lookup_investment_type
 from src.ml.features import build_feature_frame, next_business_day
 from src.ml.storage import best_model_name, load_model
 
@@ -18,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 
 def predict_next_close(investment_id: str, model_name: str | None = None) -> dict:
-    history = load_price_history(investment_id)
+    investment_type = lookup_investment_type(investment_id)
+    history = load_price_history(investment_id, investment_type)
     _X, _y, live_row = build_feature_frame(history)
 
     model_name = model_name or best_model_name(investment_id)
@@ -41,10 +43,18 @@ def predict_next_close(investment_id: str, model_name: str | None = None) -> dic
     predicted_close = float(model.predict(live_row)[0])
     last_known_date = history["event_date"].max().date()
     last_known_close = float(live_row["close_lag_0"].iloc[0])
-    target_date = next_business_day(last_known_date)
+
+    # Crypto markets never close, so "the next day" is just tomorrow; stock
+    # exchanges do, so Friday's next day is Monday.
+    target_date = (
+        last_known_date + timedelta(days=1)
+        if investment_type == "crypto"
+        else next_business_day(last_known_date)
+    )
 
     result = {
         "investment_id": investment_id,
+        "investment_type": investment_type,
         "model_name": model_name,
         "last_known_date": last_known_date.isoformat(),
         "last_known_close": last_known_close,

@@ -46,6 +46,71 @@ def calendar_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def long_horizon_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Longer lookback than price_lag_features/rolling_stat_features (which
+    only look 1-10 rows back): month-ish (20), quarter-ish (60) and
+    year-ish (252 trading days) rolling stats, momentum, and where today's
+    close sits relative to its own trailing 252-day range. Needs deep
+    history to produce anything (the first ~252 rows of a young asset will
+    be NaN and get dropped by build_feature_frame's dropna).
+    """
+    out = pd.DataFrame(index=df.index)
+    close = df["close"]
+    for window in (20, 60, 252):
+        out[f"rolling_mean_{window}"] = close.rolling(window).mean()
+        out[f"return_{window}d"] = close.pct_change(window)
+    out["rolling_std_20"] = close.rolling(20).std()
+    out["rolling_std_60"] = close.rolling(60).std()
+    out["pct_from_252d_high"] = close / close.rolling(252).max() - 1
+    out["pct_from_252d_low"] = close / close.rolling(252).min() - 1
+    return out
+
+
+def _nearest_close_years_ago(df: pd.DataFrame, years_back: int) -> pd.Series:
+    """The close price on the trading day nearest to exactly `years_back`
+    calendar years before each row's date -- i.e. "the same day last year",
+    tolerant of that exact calendar date falling on a weekend/holiday.
+    """
+    target_dates = pd.DataFrame(
+        {"_row": range(len(df)), "event_date": df["event_date"] - pd.DateOffset(years=years_back)}
+    ).sort_values("event_date")
+    lookup = df[["event_date", "close"]].sort_values("event_date")
+
+    matched = pd.merge_asof(
+        target_dates, lookup, on="event_date", direction="nearest", tolerance=pd.Timedelta(days=10)
+    ).sort_values("_row")
+    return pd.Series(matched["close"].to_numpy(), index=df.index)
+
+
+def _same_month_last_year_avg_close(df: pd.DataFrame) -> pd.Series:
+    """Average close during the same calendar month one year ago -- e.g.
+    for a row in July 2026, the average close across all of July 2025.
+    Always fully in the past relative to the row it's attached to.
+    """
+    dates = df["event_date"]
+    monthly_avg = df.assign(_y=dates.dt.year, _m=dates.dt.month).groupby(["_y", "_m"])["close"].mean()
+    keys = pd.MultiIndex.from_arrays([dates.dt.year - 1, dates.dt.month])
+    return pd.Series(monthly_avg.reindex(keys).to_numpy(), index=df.index)
+
+
+def seasonal_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Year-over-year comparisons against the same calendar period in prior
+    years -- "what was it doing around now, last year / two years ago".
+    Only possible with multi-year history, which is exactly why full
+    history (not a short recent window) matters for this asset.
+    """
+    out = pd.DataFrame(index=df.index)
+    for years_back in (1, 2):
+        close_years_ago = _nearest_close_years_ago(df, years_back)
+        out[f"close_{years_back}y_ago"] = close_years_ago
+        out[f"return_{years_back}y"] = df["close"] / close_years_ago - 1
+
+    same_month_avg = _same_month_last_year_avg_close(df)
+    out["same_month_last_year_avg_close"] = same_month_avg
+    out["vs_same_month_last_year"] = df["close"] / same_month_avg - 1
+    return out
+
+
 # Registered in order; each builder receives the raw OHLCV history frame
 # (event_date, open, high, low, close, volume) and returns the columns it
 # contributes. To bring in more variables later (fundamentals, macro data,
@@ -56,6 +121,8 @@ FEATURE_BUILDERS: list[FeatureBuilder] = [
     return_features,
     rolling_stat_features,
     calendar_features,
+    long_horizon_features,
+    seasonal_features,
 ]
 
 

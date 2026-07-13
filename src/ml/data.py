@@ -4,6 +4,7 @@ import pandas as pd
 from google.cloud import bigquery
 
 from src.config.settings import settings
+from src.config.watchlist_loader import load_watchlist
 
 _client: bigquery.Client | None = None
 
@@ -39,3 +40,13 @@ def load_price_history(investment_id: str, investment_type: str = "stock") -> pd
     df = client.query(query, job_config=job_config).to_dataframe()
     df["event_date"] = pd.to_datetime(df["event_date"])
     return df.reset_index(drop=True)
+
+
+def lookup_investment_type(investment_id: str, default: str = "stock") -> str:
+    """Look up an asset's type from the watchlist, so callers that only
+    have an id (e.g. a CLI arg) don't have to also pass the type by hand.
+    """
+    for asset in load_watchlist():
+        if asset.id == investment_id:
+            return asset.type
+    return default

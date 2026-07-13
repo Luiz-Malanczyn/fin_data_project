@@ -1,4 +1,4 @@
-"""Train and compare every registered model for one (or all active) stocks.
+"""Train and compare every registered model for one (or all active) investments.
 
 Comparison uses TimeSeriesSplit cross-validation (never shuffled -- each
 fold trains only on the past and validates on the future, like the model
@@ -8,7 +8,8 @@ later comparisons once more features are added -- not just the winner.
 
 Usage:
     python -m src.ml.train PETR4
-    python -m src.ml.train          # trains every active stock in the watchlist
+    python -m src.ml.train bitcoin crypto   # type only needed if not in the watchlist
+    python -m src.ml.train                  # trains every active asset in the watchlist
 """
 from __future__ import annotations
 
@@ -17,8 +18,8 @@ import sys
 
 from sklearn.model_selection import TimeSeriesSplit
 
-from src.config.watchlist_loader import filter_by_type, load_watchlist
-from src.ml.data import load_price_history
+from src.config.watchlist_loader import load_watchlist
+from src.ml.data import load_price_history, lookup_investment_type
 from src.ml.features import build_feature_frame
 from src.ml.metrics import compute_metrics
 from src.ml.models import MODEL_REGISTRY
@@ -54,9 +55,9 @@ def _cross_validate(model_factory, X, y) -> dict:
     }
 
 
-def train_and_compare(investment_id: str) -> list[dict]:
-    logger.info("Loading price history for %s...", investment_id)
-    history = load_price_history(investment_id)
+def train_and_compare(investment_id: str, investment_type: str = "stock") -> list[dict]:
+    logger.info("Loading price history for %s (%s)...", investment_id, investment_type)
+    history = load_price_history(investment_id, investment_type)
     X, y, _live_row = build_feature_frame(history)
     logger.info("%d labeled rows, %d features", len(X), X.shape[1])
 
@@ -87,13 +88,18 @@ def train_and_compare(investment_id: str) -> list[dict]:
     return results
 
 
-def train_all_active_stocks() -> dict[str, list[dict]]:
-    assets = filter_by_type(load_watchlist(), "stock")
-    return {asset.id: train_and_compare(asset.id) for asset in assets}
+def train_all_active_assets() -> dict[str, list[dict]]:
+    """Trains every active asset in the watchlist, regardless of investment
+    type -- stocks and crypto go through the exact same pipeline.
+    """
+    assets = [a for a in load_watchlist() if a.active]
+    return {asset.id: train_and_compare(asset.id, asset.type) for asset in assets}
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 2:
-        train_and_compare(sys.argv[1])
+    if len(sys.argv) == 1:
+        train_all_active_assets()
+    elif len(sys.argv) == 2:
+        train_and_compare(sys.argv[1], lookup_investment_type(sys.argv[1]))
     else:
-        train_all_active_stocks()
+        train_and_compare(sys.argv[1], sys.argv[2])
