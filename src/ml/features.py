@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from src.ml.dividend_data import get_dividend_history
+from src.ml.fundamentals_data import get_fundamentals_history
 from src.ml.macro_data import get_macro_data
 
 FeatureBuilder = Callable[[pd.DataFrame], pd.DataFrame]
@@ -240,6 +241,40 @@ def dividend_features(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return out
 
 
+def fundamentals_features(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """P/L, ROE, debt/equity, and net margin from CVM's quarterly filings
+    (see fundamentals_data.py), as-of joined on each statement's real
+    public disclosure date rather than the quarter it covers -- a row never
+    sees a number before it actually existed. Needs the specific stock's
+    CVM company code, so wired in per-asset by build_feature_frame like
+    dividend_features rather than living in STOCK_ONLY_FEATURE_BUILDERS.
+
+    No neutral fallback like dividend_yield_ttm's 0.0: a missing P/L or ROE
+    has no meaningful zero value, so rows before the first disclosure (CVM
+    coverage starts 2011) or for tickers with no CNPJ mapping just get NaN
+    and fall out through the dropna() in build_feature_frame.
+    """
+    fundamentals = get_fundamentals_history(ticker)
+    out = pd.DataFrame(index=df.index)
+    if fundamentals.empty:
+        out["pe_ratio"] = np.nan
+        out["roe_ltm"] = np.nan
+        out["debt_to_equity"] = np.nan
+        out["net_margin_ltm"] = np.nan
+        return out
+
+    cols = _merge_asof_backward(
+        df["event_date"],
+        fundamentals,
+        ["revenue_ltm", "net_income_ltm", "eps_ltm", "equity", "total_liabilities"],
+    )
+    out["pe_ratio"] = df["close"].to_numpy() / cols["eps_ltm"].to_numpy()
+    out["roe_ltm"] = cols["net_income_ltm"].to_numpy() / cols["equity"].to_numpy()
+    out["debt_to_equity"] = cols["total_liabilities"].to_numpy() / cols["equity"].to_numpy()
+    out["net_margin_ltm"] = cols["net_income_ltm"].to_numpy() / cols["revenue_ltm"].to_numpy()
+    return out
+
+
 # Registered in order; each builder receives the raw OHLCV history frame
 # (event_date, open, high, low, close, volume) and returns the columns it
 # contributes. To bring in more variables later (fundamentals, ...), add a
@@ -306,6 +341,7 @@ def build_feature_frame(
         feature_frames += [builder(df) for builder in STOCK_ONLY_FEATURE_BUILDERS]
         if investment_id:
             feature_frames.append(dividend_features(df, f"{investment_id}.SA"))
+            feature_frames.append(fundamentals_features(df, investment_id))
     features = pd.concat(feature_frames, axis=1)
     # A handful of features are ratios (volume_change_1d, macro returns);
     # a zero-volume illiquid day or similar upstream glitch can turn one of
