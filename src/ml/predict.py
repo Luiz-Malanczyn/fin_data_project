@@ -46,9 +46,12 @@ def predict_horizon(investment_id: str, horizon: str, model_name: str | None = N
             "Retrain with `python -m src.ml.train` after changing feature engineering."
         )
 
-    predicted_close = float(model.predict(live_row)[0])
+    # Models are fit on the return over the horizon, not the raw future
+    # price (see build_feature_frame) -- convert back to price here.
+    predicted_return = float(model.predict(live_row)[0])
     last_known_date = history["event_date"].max().date()
     last_known_close = float(live_row["close_lag_0"].iloc[0])
+    predicted_close = last_known_close * (1 + predicted_return)
     target_date = target_date_for_horizon(last_known_date, investment_type, horizon)
 
     result = {
@@ -60,7 +63,7 @@ def predict_horizon(investment_id: str, horizon: str, model_name: str | None = N
         "last_known_close": last_known_close,
         "target_date": target_date.isoformat(),
         "predicted_close": predicted_close,
-        "predicted_change_pct": (predicted_close / last_known_close - 1) * 100,
+        "predicted_change_pct": predicted_return * 100,
     }
     logger.info(
         "[%s/%s] %s: %s close=%.2f -> predicted %s close=%.2f (%+.2f%%)",
@@ -103,6 +106,10 @@ def predict_horizon_detail(investment_id: str, horizon: str) -> dict:
         best_directional = max(non_naive, key=lambda m: m["metrics"]["directional_accuracy"])
         pred = predict_horizon(investment_id, horizon, best_directional["model_name"])
         pred["directional_accuracy"] = best_directional["metrics"]["directional_accuracy"]
+        pred["directional_accuracy_pvalue"] = best_directional["metrics"]["directional_accuracy_pvalue"]
+        pred["directional_accuracy_significant"] = best_directional["metrics"][
+            "directional_accuracy_significant"
+        ]
         result["best_directional"] = pred
     return result
 

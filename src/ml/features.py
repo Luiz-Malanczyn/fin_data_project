@@ -46,6 +46,19 @@ def calendar_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def volume_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Volume relative to its own recent average, and day-over-day change --
+    raw volume_lag_0 alone doesn't say whether today's volume was high or
+    low *for this asset*, only these ratio features do.
+    """
+    out = pd.DataFrame(index=df.index)
+    volume = df["volume"]
+    out["volume_ratio_5"] = volume / volume.rolling(5).mean() - 1
+    out["volume_ratio_20"] = volume / volume.rolling(20).mean() - 1
+    out["volume_change_1d"] = volume.pct_change(1)
+    return out
+
+
 def long_horizon_features(df: pd.DataFrame) -> pd.DataFrame:
     """Longer lookback than price_lag_features/rolling_stat_features (which
     only look 1-10 rows back): month-ish (20), quarter-ish (60) and
@@ -121,6 +134,7 @@ FEATURE_BUILDERS: list[FeatureBuilder] = [
     return_features,
     rolling_stat_features,
     calendar_features,
+    volume_features,
     long_horizon_features,
     seasonal_features,
 ]
@@ -136,6 +150,14 @@ def build_feature_frame(
     changes; only how far forward `target` is shifted does, so the same
     features can be compared at daily/weekly/monthly horizons.
 
+    `y` is the **return** over the horizon (future_close / close - 1), not
+    the raw future price. Today's close is already ~all of the information
+    in tomorrow's close, so fitting raw price lets a model win just by
+    copying `close_lag_0` -- that's the actual reason "no change" was so
+    hard to beat. Fitting the return instead forces every model to commit
+    to an actual delta; predictions are converted back to price at
+    display time (predicted_close = close_lag_0 * (1 + predicted_return)).
+
     X/y cover every row with a known target that many rows ahead, ready for
     training/evaluation. `live_row` is always the single most recent row
     (features only -- its target is in the future, unknown): feed it to a
@@ -144,7 +166,8 @@ def build_feature_frame(
     df = price_history.sort_values("event_date").reset_index(drop=True)
 
     features = pd.concat([builder(df) for builder in FEATURE_BUILDERS], axis=1)
-    target = df["close"].shift(-horizon_days)
+    future_close = df["close"].shift(-horizon_days)
+    target = future_close / df["close"] - 1
 
     live_row = features.iloc[[-1]]
 
