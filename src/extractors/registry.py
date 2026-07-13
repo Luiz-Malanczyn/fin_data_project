@@ -4,11 +4,13 @@ from src.extractors.base import BaseExtractor
 from src.extractors.crypto.binance_extractor import BinanceCryptoExtractor
 from src.extractors.crypto.coingecko_extractor import CoinGeckoCryptoExtractor
 from src.extractors.stocks.brapi_extractor import BrapiStockExtractor
+from src.extractors.stocks.yahoo_extractor import YahooFinanceStockExtractor
 
 # (investment_type, source) -> extractor class.
 # Registering a new source only requires adding an entry here, no pipeline changes.
 EXTRACTOR_REGISTRY: dict[tuple[str, str], type[BaseExtractor]] = {
     ("stock", "brapi"): BrapiStockExtractor,
+    ("stock", "yahoo"): YahooFinanceStockExtractor,
     ("crypto", "coingecko"): CoinGeckoCryptoExtractor,
     ("crypto", "binance"): BinanceCryptoExtractor,
 }
