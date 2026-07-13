@@ -14,8 +14,8 @@ from src.pipelines.runner import run_pipeline
 # Per-type param override that asks each source for its full available
 # history instead of the watchlist's usual short incremental window.
 FULL_HISTORY_OVERRIDES: dict[str, dict] = {
-    "stock": {"range": "max"},   # brapi.dev: max daily history available, free tier
-    "crypto": {"days": 365},     # CoinGecko: days="max" needs a paid plan; 365 is the free-tier ceiling
+    "stock": {"range": "max"},          # brapi.dev: max daily history available, free tier
+    "crypto": {"full_history": True},   # Binance: paginates back to the symbol's listing date, free tier
 }
 
 

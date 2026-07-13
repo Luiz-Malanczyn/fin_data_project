@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.extractors.base import BaseExtractor
+from src.extractors.crypto.binance_extractor import BinanceCryptoExtractor
 from src.extractors.crypto.coingecko_extractor import CoinGeckoCryptoExtractor
 from src.extractors.stocks.brapi_extractor import BrapiStockExtractor
 
@@ -9,6 +10,7 @@ from src.extractors.stocks.brapi_extractor import BrapiStockExtractor
 EXTRACTOR_REGISTRY: dict[tuple[str, str], type[BaseExtractor]] = {
     ("stock", "brapi"): BrapiStockExtractor,
     ("crypto", "coingecko"): CoinGeckoCryptoExtractor,
+    ("crypto", "binance"): BinanceCryptoExtractor,
 }
 
 

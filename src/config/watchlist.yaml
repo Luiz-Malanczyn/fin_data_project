@@ -21,8 +21,9 @@ assets:
 
   - id: bitcoin
     type: crypto
-    source: coingecko
+    source: binance
     active: true
     params:
-      vs_currency: usd
-      days: 90
+      symbol: BTCUSDT
+      interval: 1d
+      limit: 3
