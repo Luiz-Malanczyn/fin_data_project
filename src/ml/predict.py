@@ -25,7 +25,9 @@ def predict_horizon(investment_id: str, horizon: str, model_name: str | None = N
     horizon_days = HORIZON_STEPS[investment_type][horizon]
 
     history = load_price_history(investment_id, investment_type)
-    _X, _y, live_row = build_feature_frame(history, horizon_days=horizon_days)
+    _X, _y, live_row = build_feature_frame(
+        history, horizon_days=horizon_days, investment_type=investment_type
+    )
 
     model_name = model_name or best_model_name(investment_id, horizon)
     if model_name is None:

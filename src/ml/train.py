@@ -85,7 +85,9 @@ def train_horizon(investment_id: str, investment_type: str, horizon: str) -> lis
     horizon_days = HORIZON_STEPS[investment_type][horizon]
     logger.info("[%s/%s] loading price history...", investment_id, horizon)
     history = load_price_history(investment_id, investment_type)
-    X, y, _live_row = build_feature_frame(history, horizon_days=horizon_days)
+    X, y, _live_row = build_feature_frame(
+        history, horizon_days=horizon_days, investment_type=investment_type
+    )
     logger.info("[%s/%s] %d labeled rows, %d features", investment_id, horizon, len(X), X.shape[1])
 
     logger.info("[%s/%s] tuning tree hyperparameters...", investment_id, horizon)

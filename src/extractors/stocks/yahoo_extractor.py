@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -8,6 +9,9 @@ from src.extractors.stocks.base_stock_extractor import BaseStockExtractor
 from src.models.schemas import AssetConfig, InvestmentHistoryRecord
 
 CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
+FULL_HISTORY_START = datetime(2000, 1, 1, tzinfo=timezone.utc)
+FULL_HISTORY_CHUNK_YEARS = 9
+MAX_CHUNK_RETRIES = 3
 
 
 class YahooFinanceStockExtractor(BaseStockExtractor):
@@ -27,18 +31,89 @@ class YahooFinanceStockExtractor(BaseStockExtractor):
 
     def fetch_raw(self, asset: AssetConfig) -> dict:
         symbol = asset.params.get("symbol", f"{asset.id}.SA")
-        params = {
-            "range": asset.params.get("range", "5d"),
-            "interval": asset.params.get("interval", "1d"),
-        }
+        interval = asset.params.get("interval", "1d")
+        range_param = asset.params.get("range", "5d")
+
+        if range_param == "max":
+            # Yahoo silently downgrades range=max&interval=1d to monthly
+            # bars on long histories (confirmed on both ^BVSP and individual
+            # B3 stocks) -- explicit period1/period2 windows keep it honest.
+            return self._fetch_full_history(symbol, interval)
+
         response = requests.get(
             f"{CHART_URL}/{symbol}",
-            params=params,
+            params={"range": range_param, "interval": interval},
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=30,
         )
         response.raise_for_status()
         return response.json()
+
+    def _fetch_full_history(self, symbol: str, interval: str) -> dict:
+        chunk_start = FULL_HISTORY_START
+        now = datetime.now(timezone.utc)
+
+        timestamps: list[int] = []
+        quote = {"open": [], "high": [], "low": [], "close": [], "volume": []}
+        adjclose: list[float | None] = []
+        meta: dict = {}
+
+        while chunk_start <= now:
+            chunk_end = min(chunk_start.replace(year=chunk_start.year + FULL_HISTORY_CHUNK_YEARS), now)
+
+            # Batch-fetching many chunks/symbols back to back occasionally
+            # gets a soft-throttled 200 response with an empty `result` --
+            # no exception to catch, just missing data -- so retry on that
+            # too, not only on HTTP errors.
+            results: list = []
+            for attempt in range(1, MAX_CHUNK_RETRIES + 1):
+                response = requests.get(
+                    f"{CHART_URL}/{symbol}",
+                    params={
+                        "period1": int(chunk_start.timestamp()),
+                        "period2": int(chunk_end.timestamp()),
+                        "interval": interval,
+                    },
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=30,
+                )
+                response.raise_for_status()
+                results = (response.json().get("chart") or {}).get("result") or []
+                if results and results[0].get("timestamp"):
+                    break
+                if attempt < MAX_CHUNK_RETRIES:
+                    time.sleep(1.5 * attempt)
+
+            if results:
+                result = results[0]
+                meta = meta or (result.get("meta") or {})
+                chunk_timestamps = result.get("timestamp") or []
+                chunk_quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+                chunk_adjclose = ((result.get("indicators") or {}).get("adjclose") or [{}])[0].get(
+                    "adjclose"
+                ) or []
+
+                timestamps.extend(chunk_timestamps)
+                for key in quote:
+                    values = chunk_quote.get(key) or [None] * len(chunk_timestamps)
+                    quote[key].extend(values)
+                adjclose.extend(chunk_adjclose or [None] * len(chunk_timestamps))
+
+            chunk_start = chunk_end + timedelta(days=1)
+            if chunk_start <= now:
+                time.sleep(0.3)  # light pacing between chunks/symbols to avoid soft throttling
+
+        return {
+            "chart": {
+                "result": [
+                    {
+                        "meta": meta,
+                        "timestamp": timestamps,
+                        "indicators": {"quote": [quote], "adjclose": [{"adjclose": adjclose}]},
+                    }
+                ]
+            }
+        }
 
     def normalize(self, raw: dict, asset: AssetConfig) -> list[InvestmentHistoryRecord]:
         results = (raw.get("chart") or {}).get("result") or []

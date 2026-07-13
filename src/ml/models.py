@@ -55,6 +55,35 @@ class NaiveDriftRegressor(BaseEstimator, RegressorMixin):
         return avg_daily_return * self.horizon_days
 
 
+class TreeEnsembleRegressor(BaseEstimator, RegressorMixin):
+    """Averages random_forest + gradient_boosting + xgboost predictions.
+
+    These three are the ones that have shown (mostly) significant
+    directional accuracy across assets/horizons, so averaging them is a
+    principled, pre-registered choice -- not picking whichever individual
+    model happened to score best on this particular data, which would be a
+    subtle form of overfitting to the comparison itself. Evaluated through
+    the exact same CV/significance pipeline as every other model, with no
+    special-casing.
+    """
+
+    def __init__(self, tree_params: dict[str, dict] | None = None):
+        self.tree_params = tree_params
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "TreeEnsembleRegressor":
+        params = {**DEFAULT_TREE_PARAMS, **(self.tree_params or {})}
+        self._models = [
+            RandomForestRegressor(random_state=42, n_jobs=-1, **params["random_forest"]).fit(X, y),
+            GradientBoostingRegressor(random_state=42, **params["gradient_boosting"]).fit(X, y),
+            XGBRegressor(random_state=42, n_jobs=-1, **params["xgboost"]).fit(X, y),
+        ]
+        return self
+
+    def predict(self, X: pd.DataFrame):
+        predictions = np.column_stack([model.predict(X) for model in self._models])
+        return predictions.mean(axis=1)
+
+
 def build_model_registry(
     horizon_days: int, tuned_params: dict[str, dict] | None = None
 ) -> dict[str, Callable[[], BaseEstimator]]:
@@ -88,4 +117,5 @@ def build_model_registry(
             random_state=42, **params["gradient_boosting"]
         ),
         "xgboost": lambda: XGBRegressor(random_state=42, n_jobs=-1, **params["xgboost"]),
+        "tree_ensemble": lambda: TreeEnsembleRegressor(tree_params=tuned_params),
     }

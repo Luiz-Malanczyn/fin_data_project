@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Callable
 
+import numpy as np
 import pandas as pd
+
+from src.ml.macro_data import get_macro_data
 
 FeatureBuilder = Callable[[pd.DataFrame], pd.DataFrame]
 
@@ -124,11 +127,58 @@ def seasonal_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _merge_asof_backward(df: pd.DataFrame, other: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """As-of join: for each row in df, the latest known value of `columns`
+    from `other` at or before that date. `direction="backward"` is what
+    makes this leak-free for series that don't update every day (Selic
+    only changes on COPOM dates) -- it carries the last known value
+    forward instead of interpolating from the future.
+    """
+    # merge_asof requires identical datetime64 units on both sides; sources
+    # differ (BigQuery DATE vs. parsed strings), so normalize explicitly
+    # instead of relying on both frames happening to agree.
+    left = pd.DataFrame(
+        {"_row": range(len(df)), "event_date": pd.to_datetime(df["event_date"]).astype("datetime64[ns]")}
+    ).sort_values("event_date")
+    right = other[["event_date"] + columns].copy()
+    right["event_date"] = pd.to_datetime(right["event_date"]).astype("datetime64[ns]")
+    right = right.sort_values("event_date")
+    merged = pd.merge_asof(left, right, on="event_date", direction="backward").sort_values("_row")
+    return merged[columns].reset_index(drop=True)
+
+
+def macro_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Stock-only: Ibovespa (market-wide momentum + this stock's return
+    relative to it), USD/BRL (currency moves matter a lot for exporters
+    like PETR4/VALE3/SUZB3), and the Selic policy rate. Registered
+    separately from FEATURE_BUILDERS in build_feature_frame -- crypto has
+    no natural equivalent to "the Brazilian stock index" or "the Brazilian
+    policy rate", so this builder never runs for it.
+    """
+    ibov, usd_brl, selic = get_macro_data()
+    out = pd.DataFrame(index=df.index)
+
+    ibov_cols = _merge_asof_backward(df, ibov, ["ibov_return_1d", "ibov_return_5d", "ibov_return_20d"])
+    out["ibov_return_1d"] = ibov_cols["ibov_return_1d"]
+    out["ibov_return_5d"] = ibov_cols["ibov_return_5d"]
+    out["ibov_return_20d"] = ibov_cols["ibov_return_20d"]
+    out["relative_strength_1d"] = df["close"].pct_change(1).to_numpy() - out["ibov_return_1d"].to_numpy()
+
+    usd_brl_cols = _merge_asof_backward(df, usd_brl, ["usd_brl", "usd_brl_return_5d"])
+    out["usd_brl"] = usd_brl_cols["usd_brl"]
+    out["usd_brl_return_5d"] = usd_brl_cols["usd_brl_return_5d"]
+
+    selic_cols = _merge_asof_backward(df, selic, ["selic_rate"])
+    out["selic_rate"] = selic_cols["selic_rate"]
+
+    return out
+
+
 # Registered in order; each builder receives the raw OHLCV history frame
 # (event_date, open, high, low, close, volume) and returns the columns it
-# contributes. To bring in more variables later (fundamentals, macro data,
-# ...), add a builder that joins its own source onto `event_date` and
-# returns the extra columns here -- training/comparison code doesn't change.
+# contributes. To bring in more variables later (fundamentals, ...), add a
+# builder that joins its own source onto `event_date` and returns the extra
+# columns here -- training/comparison code doesn't change.
 FEATURE_BUILDERS: list[FeatureBuilder] = [
     price_lag_features,
     return_features,
@@ -139,9 +189,16 @@ FEATURE_BUILDERS: list[FeatureBuilder] = [
     seasonal_features,
 ]
 
+# Stock-only builders, appended on top of FEATURE_BUILDERS. Kept separate
+# because they fetch external data with no equivalent for other investment
+# types (see macro_features).
+STOCK_ONLY_FEATURE_BUILDERS: list[FeatureBuilder] = [
+    macro_features,
+]
+
 
 def build_feature_frame(
-    price_history: pd.DataFrame, horizon_days: int = 1
+    price_history: pd.DataFrame, horizon_days: int = 1, investment_type: str = "stock"
 ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """Build (X, y, live_row) from raw OHLCV history.
 
@@ -149,6 +206,10 @@ def build_feature_frame(
     row", 5 for "5 rows from now", etc. The feature set itself never
     changes; only how far forward `target` is shifted does, so the same
     features can be compared at daily/weekly/monthly horizons.
+
+    `investment_type="stock"` also appends STOCK_ONLY_FEATURE_BUILDERS
+    (Ibovespa/USD-BRL/Selic) -- skipped for crypto and anything else, which
+    has no natural equivalent.
 
     `y` is the **return** over the horizon (future_close / close - 1), not
     the raw future price. Today's close is already ~all of the information
@@ -165,7 +226,13 @@ def build_feature_frame(
     """
     df = price_history.sort_values("event_date").reset_index(drop=True)
 
-    features = pd.concat([builder(df) for builder in FEATURE_BUILDERS], axis=1)
+    builders = FEATURE_BUILDERS + (STOCK_ONLY_FEATURE_BUILDERS if investment_type == "stock" else [])
+    features = pd.concat([builder(df) for builder in builders], axis=1)
+    # A handful of features are ratios (volume_change_1d, macro returns);
+    # a zero-volume illiquid day or similar upstream glitch can turn one of
+    # those into +-inf, which every sklearn estimator rejects outright. NaN
+    # already funnels through the same dropna() below, so infinities do too.
+    features = features.replace([np.inf, -np.inf], np.nan)
     future_close = df["close"].shift(-horizon_days)
     target = future_close / df["close"] - 1
 

@@ -19,6 +19,102 @@ assets:
       range: 5d
       interval: 1d
 
+  # 10 largest B3 companies by market cap, added to test whether directional
+  # signal found on PETR4/MGLU3 generalizes across sectors, or is specific
+  # to those two. brapi.dev's free (no-token) tier only allows a handful of
+  # "demo" tickers (PETR4/MGLU3/VALE3/ITUB4 among them) -- everything else
+  # returns 401 MISSING_TOKEN, so the rest use the Yahoo Finance source
+  # registered earlier for exactly this situation.
+  - id: VALE3
+    type: stock
+    source: brapi
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
+  - id: ITUB4
+    type: stock
+    source: brapi
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
+  - id: BBDC4
+    type: stock
+    source: yahoo
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
+  - id: ABEV3
+    type: stock
+    source: yahoo
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
+  - id: WEGE3
+    type: stock
+    source: yahoo
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
+  - id: BBAS3
+    type: stock
+    source: yahoo
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
+  - id: B3SA3
+    type: stock
+    source: yahoo
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
+  - id: RENT3
+    type: stock
+    source: yahoo
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
+  - id: SUZB3
+    type: stock
+    source: yahoo
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
+  - id: EQTL3
+    type: stock
+    source: yahoo
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
   - id: bitcoin
     type: crypto
     source: binance
