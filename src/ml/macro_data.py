@@ -141,9 +141,19 @@ def get_macro_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """(ibovespa, usd_brl, selic) history, fetched once and cached for the
     life of the process -- every stock's feature build reuses the same
     three frames instead of re-fetching per asset.
+
+    Populated into a local dict first and only copied into the module-level
+    cache once all three fetches succeed -- if e.g. the Selic fetch fails
+    after Ibovespa already succeeded, a naive "cache as you go" approach
+    would leave `_cache` holding ibov but missing selic, so every
+    subsequent call in the same process would `if "ibov" not in _cache`
+    (true) and skip re-fetching, then KeyError on `_cache["selic"]".
     """
     if "ibov" not in _cache:
-        _cache["ibov"] = fetch_ibovespa_history()
-        _cache["usd_brl"] = fetch_usd_brl_history()
-        _cache["selic"] = fetch_selic_history()
+        fetched = {
+            "ibov": fetch_ibovespa_history(),
+            "usd_brl": fetch_usd_brl_history(),
+            "selic": fetch_selic_history(),
+        }
+        _cache.update(fetched)
     return _cache["ibov"], _cache["usd_brl"], _cache["selic"]

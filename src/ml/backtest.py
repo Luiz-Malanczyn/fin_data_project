@@ -62,7 +62,7 @@ def backtest_horizon(investment_id: str, horizon: str, model_name: str | None = 
 
     history = load_price_history(investment_id, investment_type)
     X, y, _live_row = build_feature_frame(
-        history, horizon_days=horizon_days, investment_type=investment_type
+        history, horizon_days=horizon_days, investment_type=investment_type, investment_id=investment_id
     )
 
     model_name = model_name or _choose_model_name(investment_id, horizon)

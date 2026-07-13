@@ -6,6 +6,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+from src.ml.dividend_data import get_dividend_history
 from src.ml.macro_data import get_macro_data
 
 FeatureBuilder = Callable[[pd.DataFrame], pd.DataFrame]
@@ -59,6 +60,22 @@ def volume_features(df: pd.DataFrame) -> pd.DataFrame:
     out["volume_ratio_5"] = volume / volume.rolling(5).mean() - 1
     out["volume_ratio_20"] = volume / volume.rolling(20).mean() - 1
     out["volume_change_1d"] = volume.pct_change(1)
+    return out
+
+
+def risk_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Realized volatility (annualized) and a Sharpe-like risk-adjusted
+    momentum ratio -- pure price-derived, so unlike fundamentals these are
+    exactly correct at every historical point, and apply to any asset
+    (stock or crypto) since they don't depend on Ibovespa/Selic.
+    """
+    out = pd.DataFrame(index=df.index)
+    daily_return = df["close"].pct_change(1)
+    for window in (20, 60):
+        vol = daily_return.rolling(window).std() * np.sqrt(252)
+        out[f"volatility_{window}d"] = vol
+        mean_return_annualized = daily_return.rolling(window).mean() * 252
+        out[f"sharpe_{window}d"] = mean_return_annualized / vol
     return out
 
 
@@ -127,18 +144,19 @@ def seasonal_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _merge_asof_backward(df: pd.DataFrame, other: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-    """As-of join: for each row in df, the latest known value of `columns`
-    from `other` at or before that date. `direction="backward"` is what
-    makes this leak-free for series that don't update every day (Selic
-    only changes on COPOM dates) -- it carries the last known value
-    forward instead of interpolating from the future.
+def _merge_asof_backward(dates: pd.Series, other: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """As-of join: for each date in `dates`, the latest known value of
+    `columns` from `other` at or before that date. `direction="backward"`
+    is what makes this leak-free for series that don't update every day
+    (Selic only changes on COPOM dates, dividends are paid a few times a
+    year) -- it carries the last known value forward instead of
+    interpolating from the future.
     """
     # merge_asof requires identical datetime64 units on both sides; sources
     # differ (BigQuery DATE vs. parsed strings), so normalize explicitly
     # instead of relying on both frames happening to agree.
     left = pd.DataFrame(
-        {"_row": range(len(df)), "event_date": pd.to_datetime(df["event_date"]).astype("datetime64[ns]")}
+        {"_row": range(len(dates)), "event_date": pd.to_datetime(dates).astype("datetime64[ns]")}
     ).sort_values("event_date")
     right = other[["event_date"] + columns].copy()
     right["event_date"] = pd.to_datetime(right["event_date"]).astype("datetime64[ns]")
@@ -157,20 +175,68 @@ def macro_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     ibov, usd_brl, selic = get_macro_data()
     out = pd.DataFrame(index=df.index)
+    dates = df["event_date"]
 
-    ibov_cols = _merge_asof_backward(df, ibov, ["ibov_return_1d", "ibov_return_5d", "ibov_return_20d"])
+    ibov_cols = _merge_asof_backward(dates, ibov, ["ibov_return_1d", "ibov_return_5d", "ibov_return_20d"])
     out["ibov_return_1d"] = ibov_cols["ibov_return_1d"]
     out["ibov_return_5d"] = ibov_cols["ibov_return_5d"]
     out["ibov_return_20d"] = ibov_cols["ibov_return_20d"]
     out["relative_strength_1d"] = df["close"].pct_change(1).to_numpy() - out["ibov_return_1d"].to_numpy()
 
-    usd_brl_cols = _merge_asof_backward(df, usd_brl, ["usd_brl", "usd_brl_return_5d"])
+    usd_brl_cols = _merge_asof_backward(dates, usd_brl, ["usd_brl", "usd_brl_return_5d"])
     out["usd_brl"] = usd_brl_cols["usd_brl"]
     out["usd_brl_return_5d"] = usd_brl_cols["usd_brl_return_5d"]
 
-    selic_cols = _merge_asof_backward(df, selic, ["selic_rate"])
+    selic_cols = _merge_asof_backward(dates, selic, ["selic_rate"])
     out["selic_rate"] = selic_cols["selic_rate"]
 
+    return out
+
+
+def beta_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Rolling 60-day beta vs. the Ibovespa: how much this stock amplifies
+    (beta > 1) or dampens (beta < 1) the market's moves -- a risk measure
+    that "will it go up" alone doesn't capture. Stock-only (needs the
+    index), computed from the same Ibovespa series as macro_features.
+    """
+    ibov, _usd_brl, _selic = get_macro_data()
+    out = pd.DataFrame(index=df.index)
+
+    ibov_close = _merge_asof_backward(df["event_date"], ibov, ["ibov_close"])["ibov_close"]
+    stock_return = df["close"].pct_change(1)
+    ibov_return = ibov_close.pct_change(1)
+
+    rolling_cov = stock_return.rolling(60).cov(ibov_return)
+    rolling_var = ibov_return.rolling(60).var()
+    out["beta_60d"] = rolling_cov / rolling_var
+    return out
+
+
+def dividend_features(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Trailing-twelve-month dividend yield, from real historical payment
+    dates (see dividend_data.py) -- not a current snapshot applied
+    retroactively. Needs the specific stock's own dividend history, so
+    unlike the other builders this one takes an extra argument and is
+    wired in per-asset by build_feature_frame rather than living in
+    FEATURE_BUILDERS/STOCK_ONLY_FEATURE_BUILDERS.
+    """
+    dividends = get_dividend_history(symbol)
+    out = pd.DataFrame(index=df.index)
+    if dividends.empty:
+        out["dividend_yield_ttm"] = 0.0
+        return out
+
+    dividends = dividends.copy()
+    dividends["cum_dividends"] = dividends["dividend_amount"].cumsum()
+
+    dates = df["event_date"]
+    window_start_dates = dates - pd.Timedelta(days=365)
+
+    cum_now = _merge_asof_backward(dates, dividends, ["cum_dividends"])["cum_dividends"]
+    cum_before = _merge_asof_backward(window_start_dates, dividends, ["cum_dividends"])["cum_dividends"]
+
+    ttm_dividends = (cum_now.fillna(0) - cum_before.fillna(0)).clip(lower=0)
+    out["dividend_yield_ttm"] = ttm_dividends.to_numpy() / df["close"].to_numpy()
     return out
 
 
@@ -185,6 +251,7 @@ FEATURE_BUILDERS: list[FeatureBuilder] = [
     rolling_stat_features,
     calendar_features,
     volume_features,
+    risk_features,
     long_horizon_features,
     seasonal_features,
 ]
@@ -194,11 +261,15 @@ FEATURE_BUILDERS: list[FeatureBuilder] = [
 # types (see macro_features).
 STOCK_ONLY_FEATURE_BUILDERS: list[FeatureBuilder] = [
     macro_features,
+    beta_features,
 ]
 
 
 def build_feature_frame(
-    price_history: pd.DataFrame, horizon_days: int = 1, investment_type: str = "stock"
+    price_history: pd.DataFrame,
+    horizon_days: int = 1,
+    investment_type: str = "stock",
+    investment_id: str | None = None,
 ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """Build (X, y, live_row) from raw OHLCV history.
 
@@ -208,8 +279,12 @@ def build_feature_frame(
     features can be compared at daily/weekly/monthly horizons.
 
     `investment_type="stock"` also appends STOCK_ONLY_FEATURE_BUILDERS
-    (Ibovespa/USD-BRL/Selic) -- skipped for crypto and anything else, which
-    has no natural equivalent.
+    (Ibovespa/USD-BRL/Selic/beta) -- skipped for crypto and anything else,
+    which has no natural equivalent. `investment_id` additionally enables
+    dividend_features, which needs to know *which* stock's own dividend
+    history to fetch (unlike Ibovespa/Selic, dividends aren't shared
+    across assets) -- omit it to build a feature frame without dividends
+    (e.g. for a quick check where fetching dividend history isn't worth it).
 
     `y` is the **return** over the horizon (future_close / close - 1), not
     the raw future price. Today's close is already ~all of the information
@@ -226,8 +301,12 @@ def build_feature_frame(
     """
     df = price_history.sort_values("event_date").reset_index(drop=True)
 
-    builders = FEATURE_BUILDERS + (STOCK_ONLY_FEATURE_BUILDERS if investment_type == "stock" else [])
-    features = pd.concat([builder(df) for builder in builders], axis=1)
+    feature_frames = [builder(df) for builder in FEATURE_BUILDERS]
+    if investment_type == "stock":
+        feature_frames += [builder(df) for builder in STOCK_ONLY_FEATURE_BUILDERS]
+        if investment_id:
+            feature_frames.append(dividend_features(df, f"{investment_id}.SA"))
+    features = pd.concat(feature_frames, axis=1)
     # A handful of features are ratios (volume_change_1d, macro returns);
     # a zero-volume illiquid day or similar upstream glitch can turn one of
     # those into +-inf, which every sklearn estimator rejects outright. NaN
