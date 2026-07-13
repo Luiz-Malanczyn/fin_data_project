@@ -11,48 +11,53 @@ from src.config.settings import REPO_ROOT
 MODELS_DIR = REPO_ROOT / "models"
 
 
-def _asset_dir(investment_id: str) -> Path:
-    asset_dir = MODELS_DIR / investment_id
-    asset_dir.mkdir(parents=True, exist_ok=True)
-    return asset_dir
+def _horizon_dir(investment_id: str, horizon: str) -> Path:
+    horizon_dir = MODELS_DIR / investment_id / horizon
+    horizon_dir.mkdir(parents=True, exist_ok=True)
+    return horizon_dir
 
 
-def save_model(investment_id: str, model_name: str, model, metrics: dict, feature_names: list[str]) -> Path:
+def save_model(
+    investment_id: str, horizon: str, model_name: str, model, metrics: dict, feature_names: list[str]
+) -> Path:
     """Persist a fitted model alongside a metadata sidecar recording the
     metrics it scored and the exact feature columns it was trained on --
     so a future retrain with more variables can never be silently loaded
-    against the wrong feature set.
+    against the wrong feature set. Namespaced by horizon (daily/weekly/
+    monthly) since each is trained on a different target and isn't
+    comparable to the others.
     """
-    asset_dir = _asset_dir(investment_id)
+    horizon_dir = _horizon_dir(investment_id, horizon)
 
-    model_path = asset_dir / f"{model_name}.joblib"
+    model_path = horizon_dir / f"{model_name}.joblib"
     joblib.dump(model, model_path)
 
     metadata = {
         "investment_id": investment_id,
+        "horizon": horizon,
         "model_name": model_name,
         "metrics": metrics,
         "feature_names": feature_names,
         "trained_at": datetime.now(timezone.utc).isoformat(),
     }
-    (asset_dir / f"{model_name}.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    (horizon_dir / f"{model_name}.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return model_path
 
 
-def load_model(investment_id: str, model_name: str):
-    asset_dir = _asset_dir(investment_id)
-    model = joblib.load(asset_dir / f"{model_name}.joblib")
-    metadata = json.loads((asset_dir / f"{model_name}.json").read_text(encoding="utf-8"))
+def load_model(investment_id: str, horizon: str, model_name: str):
+    horizon_dir = _horizon_dir(investment_id, horizon)
+    model = joblib.load(horizon_dir / f"{model_name}.joblib")
+    metadata = json.loads((horizon_dir / f"{model_name}.json").read_text(encoding="utf-8"))
     return model, metadata
 
 
-def load_all_metadata(investment_id: str) -> list[dict]:
-    asset_dir = _asset_dir(investment_id)
-    return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(asset_dir.glob("*.json"))]
+def load_all_metadata(investment_id: str, horizon: str) -> list[dict]:
+    horizon_dir = _horizon_dir(investment_id, horizon)
+    return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(horizon_dir.glob("*.json"))]
 
 
-def best_model_name(investment_id: str, metric: str = "mae") -> str | None:
-    metadata_list = load_all_metadata(investment_id)
+def best_model_name(investment_id: str, horizon: str, metric: str = "mae") -> str | None:
+    metadata_list = load_all_metadata(investment_id, horizon)
     if not metadata_list:
         return None
 

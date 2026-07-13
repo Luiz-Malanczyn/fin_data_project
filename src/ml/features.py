@@ -126,27 +126,54 @@ FEATURE_BUILDERS: list[FeatureBuilder] = [
 ]
 
 
-def build_feature_frame(price_history: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+def build_feature_frame(
+    price_history: pd.DataFrame, horizon_days: int = 1
+) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """Build (X, y, live_row) from raw OHLCV history.
 
-    X/y cover every row with a known next-trading-day close, ready for
-    training/evaluation. `live_row` is the single most recent row (features
-    only -- no next-day close exists yet): feed it to a trained model to
-    predict the next trading day.
+    `horizon_days` is how many rows ahead the target looks -- 1 for "next
+    row", 5 for "5 rows from now", etc. The feature set itself never
+    changes; only how far forward `target` is shifted does, so the same
+    features can be compared at daily/weekly/monthly horizons.
+
+    X/y cover every row with a known target that many rows ahead, ready for
+    training/evaluation. `live_row` is always the single most recent row
+    (features only -- its target is in the future, unknown): feed it to a
+    trained model to predict `horizon_days` ahead.
     """
     df = price_history.sort_values("event_date").reset_index(drop=True)
 
     features = pd.concat([builder(df) for builder in FEATURE_BUILDERS], axis=1)
-    target = df["close"].shift(-1)
+    target = df["close"].shift(-horizon_days)
 
-    combined = pd.concat([features, target.rename("target")], axis=1)
-    live_row = combined.iloc[[-1]].drop(columns=["target"])
+    live_row = features.iloc[[-1]]
 
-    labeled = combined.iloc[:-1].dropna()
-    X = labeled.drop(columns=["target"])
-    y = labeled["target"]
+    combined = pd.concat([features, target.rename("target")], axis=1).dropna()
+    X = combined.drop(columns=["target"])
+    y = combined["target"]
 
     return X, y, live_row
+
+
+# How many rows ahead each horizon means, per investment type. A stock
+# history has one row per trading day (~252/year); crypto has one row per
+# calendar day (it trades every day), so the row counts differ even though
+# the calendar meaning ("about a week", "about a month") is the same.
+HORIZON_STEPS: dict[str, dict[str, int]] = {
+    "stock": {"daily": 1, "weekly": 5, "monthly": 21},
+    "crypto": {"daily": 1, "weekly": 7, "monthly": 30},
+}
+
+
+def add_business_days(from_date: date, n: int) -> date:
+    """`n` weekdays after `from_date` (n=1 behaves like next_business_day)."""
+    current = from_date
+    added = 0
+    while added < n:
+        current += timedelta(days=1)
+        if current.weekday() < 5:  # Monday=0 .. Friday=4
+            added += 1
+    return current
 
 
 def next_business_day(from_date: date) -> date:
@@ -154,7 +181,16 @@ def next_business_day(from_date: date) -> date:
     `from_date` is a Friday (or weekend). Does not account for market
     holidays, only weekends.
     """
-    next_day = from_date + timedelta(days=1)
-    while next_day.weekday() >= 5:  # Saturday=5, Sunday=6
-        next_day += timedelta(days=1)
-    return next_day
+    return add_business_days(from_date, 1)
+
+
+def target_date_for_horizon(last_known_date: date, investment_type: str, horizon: str) -> date:
+    """The calendar date a prediction for `horizon` actually refers to,
+    given the most recent date there's data for. Crypto markets never
+    close, so horizons are plain calendar days; stock exchanges do, so
+    horizons skip weekends.
+    """
+    steps = HORIZON_STEPS[investment_type][horizon]
+    if investment_type == "crypto":
+        return last_known_date + timedelta(days=steps)
+    return add_business_days(last_known_date, steps)

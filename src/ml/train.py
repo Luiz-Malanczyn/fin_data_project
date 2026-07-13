@@ -1,10 +1,18 @@
-"""Train and compare every registered model for one (or all active) investments.
+"""Train and compare every registered model, at every horizon, for one (or
+all active) investments.
 
 Comparison uses TimeSeriesSplit cross-validation (never shuffled -- each
 fold trains only on the past and validates on the future, like the model
 will actually be used). Once compared, every model is refit on the full
 history and persisted, so today's "second-best" model stays available for
 later comparisons once more features are added -- not just the winner.
+
+Three horizons are trained per asset: daily (next trading day), weekly
+(~5 trading days for stocks / 7 calendar days for crypto), and monthly
+(~21 trading days / 30 calendar days). A single day's "no change" baseline
+is very hard to beat -- real price movement is mostly noise at that
+distance -- but it gets much easier to beat further out, where genuine
+trend/momentum outweighs day-to-day noise.
 
 Usage:
     python -m src.ml.train PETR4
@@ -20,9 +28,9 @@ from sklearn.model_selection import TimeSeriesSplit
 
 from src.config.watchlist_loader import load_watchlist
 from src.ml.data import load_price_history, lookup_investment_type
-from src.ml.features import build_feature_frame
+from src.ml.features import HORIZON_STEPS, build_feature_frame
 from src.ml.metrics import compute_metrics
-from src.ml.models import MODEL_REGISTRY
+from src.ml.models import build_model_registry
 from src.ml.storage import save_model
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -30,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 N_SPLITS = 5
 BASELINE_COLUMN = "close_lag_0"
+HORIZONS = ("daily", "weekly", "monthly")
 
 
 def _cross_validate(model_factory, X, y) -> dict:
@@ -55,15 +64,16 @@ def _cross_validate(model_factory, X, y) -> dict:
     }
 
 
-def train_and_compare(investment_id: str, investment_type: str = "stock") -> list[dict]:
-    logger.info("Loading price history for %s (%s)...", investment_id, investment_type)
+def train_horizon(investment_id: str, investment_type: str, horizon: str) -> list[dict]:
+    horizon_days = HORIZON_STEPS[investment_type][horizon]
+    logger.info("[%s/%s] loading price history...", investment_id, horizon)
     history = load_price_history(investment_id, investment_type)
-    X, y, _live_row = build_feature_frame(history)
-    logger.info("%d labeled rows, %d features", len(X), X.shape[1])
+    X, y, _live_row = build_feature_frame(history, horizon_days=horizon_days)
+    logger.info("[%s/%s] %d labeled rows, %d features", investment_id, horizon, len(X), X.shape[1])
 
+    model_registry = build_model_registry(horizon_days)
     results = []
-    for model_name, model_factory in MODEL_REGISTRY.items():
-        logger.info("[%s] cross-validating %s...", investment_id, model_name)
+    for model_name, model_factory in model_registry.items():
         cv_metrics = _cross_validate(model_factory, X, y)
 
         # Comparison uses the CV metrics (out-of-fold, not overfit to the
@@ -71,12 +81,13 @@ def train_and_compare(investment_id: str, investment_type: str = "stock") -> lis
         # it's as current as possible for live predictions.
         final_model = model_factory()
         final_model.fit(X, y)
-        save_model(investment_id, model_name, final_model, cv_metrics, list(X.columns))
+        save_model(investment_id, horizon, model_name, final_model, cv_metrics, list(X.columns))
 
         results.append({"model_name": model_name, **cv_metrics})
         logger.info(
-            "[%s] %s -> MAE=%.4f RMSE=%.4f directional_accuracy=%.1f%%",
+            "[%s/%s] %s -> MAE=%.4f RMSE=%.4f directional_accuracy=%.1f%%",
             investment_id,
+            horizon,
             model_name,
             cv_metrics["mae"],
             cv_metrics["rmse"],
@@ -84,13 +95,18 @@ def train_and_compare(investment_id: str, investment_type: str = "stock") -> lis
         )
 
     results.sort(key=lambda r: r["mae"])
-    logger.info("[%s] best model: %s", investment_id, results[0]["model_name"])
+    logger.info("[%s/%s] best model: %s", investment_id, horizon, results[0]["model_name"])
     return results
 
 
-def train_all_active_assets() -> dict[str, list[dict]]:
-    """Trains every active asset in the watchlist, regardless of investment
-    type -- stocks and crypto go through the exact same pipeline.
+def train_and_compare(investment_id: str, investment_type: str = "stock") -> dict[str, list[dict]]:
+    return {horizon: train_horizon(investment_id, investment_type, horizon) for horizon in HORIZONS}
+
+
+def train_all_active_assets() -> dict[str, dict[str, list[dict]]]:
+    """Trains every active asset in the watchlist, at every horizon,
+    regardless of investment type -- stocks and crypto go through the
+    exact same pipeline.
     """
     assets = [a for a in load_watchlist() if a.active]
     return {asset.id: train_and_compare(asset.id, asset.type) for asset in assets}
