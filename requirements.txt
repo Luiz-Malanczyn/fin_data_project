@@ -1,0 +1,7 @@
+requests>=2.31
+pydantic>=2.6
+PyYAML>=6.0
+google-cloud-bigquery>=3.20
+google-cloud-storage>=2.16
+pandas>=2.2
+db-dtypes>=1.2

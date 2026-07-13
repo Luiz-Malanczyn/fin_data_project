@@ -1,0 +1,5 @@
+project_id      = "your-gcp-project-id"
+region          = "us-central1"
+raw_bucket_name = "your-gcp-project-id-fin-data-raw"
+image           = "us-central1-docker.pkg.dev/your-gcp-project-id/fin-data/pipelines:latest"
+# brapi_token   = "optional, set if you have a paid token"

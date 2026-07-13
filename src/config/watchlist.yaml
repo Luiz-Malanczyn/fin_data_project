@@ -1,0 +1,28 @@
+# List of assets tracked by the framework.
+# To add a new asset, add an entry here -- no code changes required.
+assets:
+  - id: PETR4
+    type: stock
+    source: brapi
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
+  - id: MGLU3
+    type: stock
+    source: brapi
+    exchange: B3
+    active: true
+    params:
+      range: 5d
+      interval: 1d
+
+  - id: bitcoin
+    type: crypto
+    source: coingecko
+    active: true
+    params:
+      vs_currency: usd
+      days: 90

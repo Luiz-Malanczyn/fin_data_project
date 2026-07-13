@@ -1,0 +1,17 @@
+# brapi.dev works without a token on the free tier, so the secret (and the
+# env var wiring in cloud_run.tf / the accessor binding in iam.tf) is only
+# created when a real token is provided via the brapi_token variable.
+resource "google_secret_manager_secret" "brapi_token" {
+  count     = var.brapi_token != "" ? 1 : 0
+  secret_id = "brapi-token"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "brapi_token" {
+  count       = var.brapi_token != "" ? 1 : 0
+  secret      = google_secret_manager_secret.brapi_token[0].id
+  secret_data = var.brapi_token
+}
