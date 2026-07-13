@@ -12,3 +12,4 @@ data/
 terraform.tfvars
 *.tfplan
 .claude/
+models/
