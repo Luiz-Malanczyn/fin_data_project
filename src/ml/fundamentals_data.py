@@ -18,26 +18,14 @@ from datetime import date
 import pandas as pd
 import requests
 
+from src.config.company_dimension import get_company
+
 CVM_ZIP_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/{doc_type}/DADOS/{doc_type_lower}_cia_aberta_{year}.zip"
 
-# CVM identifies companies by CNPJ, not by B3 ticker -- there is no public
-# ticker-to-CNPJ lookup API, so this is a small, manually curated mapping
-# for the 12 stocks tracked in watchlist.yaml (confirmed against CVM's own
-# filing index, not guessed).
-COMPANY_CODES: dict[str, str] = {
-    "PETR4": "33.000.167/0001-01",
-    "MGLU3": "47.960.950/0001-21",
-    "VALE3": "33.592.510/0001-54",
-    "ITUB4": "60.872.504/0001-23",
-    "BBDC4": "60.746.948/0001-12",
-    "ABEV3": "07.526.557/0001-00",
-    "WEGE3": "84.429.695/0001-11",
-    "BBAS3": "00.000.000/0001-91",
-    "B3SA3": "09.346.601/0001-25",
-    "RENT3": "16.670.085/0001-55",
-    "SUZB3": "16.404.287/0001-55",
-    "EQTL3": "03.220.438/0001-73",
-}
+# CNPJ (CVM identifies companies by CNPJ, not by B3 ticker -- there is no
+# public ticker-to-CNPJ lookup API) and share_class both now live in the
+# company_dimension BigQuery table instead of a hardcoded dict here -- see
+# src/config/company_dimension.py.
 
 # CVM's standardized XBRL-based chart of accounts (and this bulk-CSV
 # distribution) starts in 2010; 2011 is the first year with a clean full
@@ -163,13 +151,17 @@ def fetch_fundamentals_history(ticker: str) -> pd.DataFrame:
     Columns: event_date, revenue_ltm, net_income_ltm, eps_ltm, equity,
     total_liabilities.
     """
-    cnpj = COMPANY_CODES.get(ticker)
+    try:
+        company = get_company(ticker)
+    except KeyError:
+        company = {}
+    cnpj = company.get("cnpj")
     if cnpj is None:
         return pd.DataFrame(
             columns=["event_date", "revenue_ltm", "net_income_ltm", "eps_ltm", "equity", "total_liabilities"]
         )
 
-    eps_code = DRE_EPS_PN_CODE if ticker.endswith("4") else DRE_EPS_ON_CODE
+    eps_code = DRE_EPS_PN_CODE if company["share_class"] == "PN" else DRE_EPS_ON_CODE
 
     quarters: dict[tuple[int, int], dict] = {}
     receipt_dates: dict[date, date] = {}

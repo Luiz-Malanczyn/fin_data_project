@@ -40,61 +40,21 @@ import trafilatura
 from google.cloud import bigquery
 
 from src.config.settings import settings
+from src.config.company_dimension import get_company, get_company_dimension
 
-# Loose search terms per ticker -- deliberately not requiring an exact/legal
-# company name (that approach was tested and found to have near-zero
-# recall). Precision is handled downstream by the domain restriction and
-# the LLM relevance check, not by the search term itself.
-COMPANY_SEARCH_TERMS: dict[str, str] = {
-    "PETR4": "petrobras",
-    "MGLU3": "magazine luiza",
-    "VALE3": "vale",
-    "ITUB4": "itau unibanco",
-    "BBDC4": "bradesco",
-    "ABEV3": "ambev",
-    "WEGE3": "weg",
-    "BBAS3": "banco do brasil",
-    "B3SA3": "b3",
-    "RENT3": "localiza",
-    "SUZB3": "suzano",
-    "EQTL3": "equatorial",
-}
 
-# URL-slug variants (article URLs use hyphens, and press often uses a
-# shorter brand nickname there even when the prose/entity-extraction side
-# doesn't) -- validation found this recovers companies V2Organizations
-# misses almost entirely: "magalu" appeared in 58 article URLs in a single
-# month where the V2Organizations entity field had 0-1 hits for either
-# "Magazine Luiza" or "Magalu".
-COMPANY_URL_TERMS: dict[str, list[str]] = {
-    "PETR4": ["petrobras"],
-    "MGLU3": ["magazine-luiza", "magalu"],
-    "VALE3": ["vale3", "vale-sa", "vale-mineracao", "vale-minerio"],
-    "ITUB4": ["itau-unibanco", "itau4", "itub4"],
-    "BBDC4": ["bradesco"],
-    "ABEV3": ["ambev"],
-    "WEGE3": ["weg-sa", "wege3"],
-    "BBAS3": ["banco-do-brasil", "bbas3"],
-    "B3SA3": ["b3sa3", "b3-brasil-bolsa", "b3-sa"],
-    "RENT3": ["localiza-rent", "localiza-hertz", "rent3"],
-    "SUZB3": ["suzano", "suzb3"],
-    "EQTL3": ["equatorial-energia", "eqtl3"],
-}
+def _news_companies() -> pd.DataFrame:
+    """Rows from the company_dimension table that participate in news
+    search -- currently every stock (crypto has no news_search_term set;
+    see seed_company_dimension.py). Per-ticker search term, URL-slug
+    variants, and display name used to be three separate hardcoded dicts
+    here (COMPANY_SEARCH_TERMS / COMPANY_URL_TERMS / COMPANY_DISPLAY_NAMES)
+    that had to be kept in sync by hand; now they're columns on the same
+    dimension row.
+    """
+    dim = get_company_dimension()
+    return dim[dim["news_search_term"].notna()]
 
-COMPANY_DISPLAY_NAMES: dict[str, str] = {
-    "PETR4": "Petrobras",
-    "MGLU3": "Magazine Luiza",
-    "VALE3": "Vale (mineradora)",
-    "ITUB4": "Itau Unibanco",
-    "BBDC4": "Bradesco",
-    "ABEV3": "Ambev",
-    "WEGE3": "WEG (industria)",
-    "BBAS3": "Banco do Brasil",
-    "B3SA3": "B3 (bolsa de valores brasileira)",
-    "RENT3": "Localiza Rent a Car",
-    "SUZB3": "Suzano (papel e celulose)",
-    "EQTL3": "Equatorial Energia",
-}
 
 # Restricting candidate articles to known Brazilian finance/news domains
 # before spending a rate-limited Gemini call on them -- cuts the noise the
@@ -132,30 +92,30 @@ def fetch_candidate_urls_all_tickers(
     start_date: date, end_date: date, max_results: int = 20000
 ) -> list[dict]:
     """Candidate article URLs from GDELT's public BigQuery GKG dataset for
-    ALL 12 tickers in one pass, restricted to known Brazilian finance
-    domains. Deliberately loose on the name match (see
-    COMPANY_SEARCH_TERMS) -- precision comes later, from the LLM relevance
+    every stock in company_dimension, in one pass, restricted to known
+    Brazilian finance domains. Deliberately loose on the name match (see
+    _news_companies()) -- precision comes later, from the LLM relevance
     check.
 
     Combines every ticker into a single query rather than one query per
     ticker: BigQuery bills by column-bytes-read within the partition range,
     which barely changes whether the WHERE clause checks one name or
-    twelve, so querying all 12 tickers together instead of 12x separately
-    is roughly a 12x cost reduction for the same coverage.
+    twelve, so querying all tickers together instead of separately is
+    roughly a 12x cost reduction for the same coverage.
     """
     domain_filter = " OR ".join(f"SourceCommonName LIKE '%{d}%'" for d in FINANCE_DOMAINS)
+    companies = _news_companies()
 
-    def _ticker_condition(ticker: str) -> str:
-        org_term = COMPANY_SEARCH_TERMS[ticker]
+    def _ticker_condition(row) -> str:
         url_conditions = " OR ".join(
-            f"LOWER(DocumentIdentifier) LIKE '%{term}%'" for term in COMPANY_URL_TERMS[ticker]
+            f"LOWER(DocumentIdentifier) LIKE '%{term}%'" for term in row.news_url_terms
         )
-        return f"(LOWER(V2Organizations) LIKE '%{org_term}%' OR {url_conditions})"
+        return f"(LOWER(V2Organizations) LIKE '%{row.news_search_term}%' OR {url_conditions})"
 
     match_columns = ",\n      ".join(
-        f"{_ticker_condition(ticker)} AS m_{ticker}" for ticker in COMPANY_SEARCH_TERMS
+        f"{_ticker_condition(row)} AS m_{row.investment_id}" for row in companies.itertuples()
     )
-    any_match = " OR ".join(f"m_{ticker}" for ticker in COMPANY_SEARCH_TERMS)
+    any_match = " OR ".join(f"m_{ticker}" for ticker in companies["investment_id"])
     query = f"""
     SELECT * FROM (
       SELECT
@@ -179,7 +139,7 @@ def fetch_candidate_urls_all_tickers(
     )
     rows = []
     for row in job.result():
-        matched = [t for t in COMPANY_SEARCH_TERMS if row[f"m_{t}"]]
+        matched = [t for t in companies["investment_id"] if row[f"m_{t}"]]
         for ticker in matched:
             rows.append(
                 {
@@ -308,7 +268,7 @@ class DailyQuotaExhausted(Exception):
 
 def _score_article(ticker: str, text: str, api_key: str) -> dict | None:
     prompt = PROMPT_TEMPLATE.format(
-        company=COMPANY_DISPLAY_NAMES[ticker], ticker=ticker, article=text[:3000]
+        company=get_company(ticker)["display_name"], ticker=ticker, article=text[:3000]
     )
     body = {"contents": [{"parts": [{"text": prompt}]}]}
     for attempt in range(1, 4):
@@ -427,7 +387,7 @@ def backfill_month(
     end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
     all_candidates = fetch_candidate_urls_all_tickers(start, end)
 
-    by_ticker: dict[str, list[dict]] = {t: [] for t in COMPANY_SEARCH_TERMS}
+    by_ticker: dict[str, list[dict]] = {t: [] for t in _news_companies()["investment_id"]}
     for c in all_candidates:
         by_ticker[c["ticker"]].append(c)
 

@@ -6,6 +6,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+from src.config.company_dimension import get_company
 from src.ml.dividend_data import get_dividend_history
 from src.ml.fundamentals_data import get_fundamentals_history
 from src.ml.macro_data import get_macro_data
@@ -356,7 +357,13 @@ def build_feature_frame(
     if investment_type == "stock":
         feature_frames += [builder(df) for builder in STOCK_ONLY_FEATURE_BUILDERS]
         if investment_id:
-            feature_frames.append(dividend_features(df, f"{investment_id}.SA"))
+            try:
+                yahoo_symbol = get_company(investment_id)["yahoo_symbol"]
+            except KeyError:
+                # Not in company_dimension yet -- fall back to the default
+                # convention rather than skipping dividends outright.
+                yahoo_symbol = f"{investment_id}.SA"
+            feature_frames.append(dividend_features(df, yahoo_symbol))
             feature_frames.append(fundamentals_features(df, investment_id))
     features = pd.concat(feature_frames, axis=1)
     # A handful of features are ratios (volume_change_1d, macro returns);
