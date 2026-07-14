@@ -249,18 +249,31 @@ def fundamentals_features(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     CVM company code, so wired in per-asset by build_feature_frame like
     dividend_features rather than living in STOCK_ONLY_FEATURE_BUILDERS.
 
-    No neutral fallback like dividend_yield_ttm's 0.0: a missing P/L or ROE
-    has no meaningful zero value, so rows before the first disclosure (CVM
-    coverage starts 2011) or for tickers with no CNPJ mapping just get NaN
-    and fall out through the dropna() in build_feature_frame.
+    Earlier version left rows with no known disclosure yet (CVM's
+    standardized filings only go back to 2011) as NaN, relying on
+    build_feature_frame's global dropna() to drop them -- but that dropna()
+    requires *every* column to be non-null, so a stock's entire pre-2011
+    price history (otherwise perfectly usable) got discarded just because
+    fundamentals weren't available yet. Measured effect: retraining all 39
+    (asset, horizon) combos this way lost 38-88% of training rows per
+    asset (worst for the two banks) and made results *worse* than not
+    having fundamentals at all (28 vs 45 significant findings, 6/39 vs
+    12/39 backtests beating buy-and-hold).
+
+    Fix: fill undisclosed/undefined ratios with a fixed neutral 0.0 (not a
+    computed mean/median -- that would leak information from later,
+    already-known quarters into earlier rows) and add `has_fundamentals`
+    so models can learn to disregard the ratio columns when it's 0, instead
+    of losing the row entirely.
     """
-    fundamentals = get_fundamentals_history(ticker)
     out = pd.DataFrame(index=df.index)
+    fundamentals = get_fundamentals_history(ticker)
     if fundamentals.empty:
-        out["pe_ratio"] = np.nan
-        out["roe_ltm"] = np.nan
-        out["debt_to_equity"] = np.nan
-        out["net_margin_ltm"] = np.nan
+        out["pe_ratio"] = 0.0
+        out["roe_ltm"] = 0.0
+        out["debt_to_equity"] = 0.0
+        out["net_margin_ltm"] = 0.0
+        out["has_fundamentals"] = 0.0
         return out
 
     cols = _merge_asof_backward(
@@ -268,10 +281,13 @@ def fundamentals_features(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
         fundamentals,
         ["revenue_ltm", "net_income_ltm", "eps_ltm", "equity", "total_liabilities"],
     )
+    out["has_fundamentals"] = cols["equity"].notna().astype(float).to_numpy()
     out["pe_ratio"] = df["close"].to_numpy() / cols["eps_ltm"].to_numpy()
     out["roe_ltm"] = cols["net_income_ltm"].to_numpy() / cols["equity"].to_numpy()
     out["debt_to_equity"] = cols["total_liabilities"].to_numpy() / cols["equity"].to_numpy()
     out["net_margin_ltm"] = cols["net_income_ltm"].to_numpy() / cols["revenue_ltm"].to_numpy()
+    for ratio_col in ("pe_ratio", "roe_ltm", "debt_to_equity", "net_margin_ltm"):
+        out[ratio_col] = out[ratio_col].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     return out
 
 
