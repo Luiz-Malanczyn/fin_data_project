@@ -49,3 +49,16 @@ variable "brapi_token" {
   default     = ""
   sensitive   = true
 }
+
+variable "gemini_api_key" {
+  description = "Google Gemini API key (free tier, AI Studio -- must come from a project with no billing account attached, or free-tier requests get billing-gated). Stored in Secret Manager. The news job is skipped entirely if empty."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "news_schedule" {
+  description = "Cron for the daily news-sentiment backfill job. Default: once a day, off-peak."
+  type        = string
+  default     = "30 6 * * *"
+}

@@ -29,6 +29,13 @@ resource "google_secret_manager_secret_iam_member" "pipelines_brapi_token_access
   member    = "serviceAccount:${google_service_account.pipelines_runtime.email}"
 }
 
+resource "google_secret_manager_secret_iam_member" "pipelines_gemini_api_key_accessor" {
+  count     = var.gemini_api_key != "" ? 1 : 0
+  secret_id = google_secret_manager_secret.gemini_api_key[0].id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.pipelines_runtime.email}"
+}
+
 # Service account used by Cloud Scheduler to trigger the Cloud Run Jobs.
 resource "google_service_account" "scheduler_invoker" {
   account_id   = "fin-data-scheduler"
@@ -47,6 +54,15 @@ resource "google_cloud_run_v2_job_iam_member" "scheduler_can_run_crypto" {
   project  = google_cloud_run_v2_job.crypto_pipeline.project
   location = google_cloud_run_v2_job.crypto_pipeline.location
   name     = google_cloud_run_v2_job.crypto_pipeline.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.scheduler_invoker.email}"
+}
+
+resource "google_cloud_run_v2_job_iam_member" "scheduler_can_run_news" {
+  count    = var.gemini_api_key != "" ? 1 : 0
+  project  = google_cloud_run_v2_job.news_pipeline[0].project
+  location = google_cloud_run_v2_job.news_pipeline[0].location
+  name     = google_cloud_run_v2_job.news_pipeline[0].name
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.scheduler_invoker.email}"
 }

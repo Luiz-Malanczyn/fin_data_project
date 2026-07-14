@@ -15,3 +15,21 @@ resource "google_secret_manager_secret_version" "brapi_token" {
   secret      = google_secret_manager_secret.brapi_token[0].id
   secret_data = var.brapi_token
 }
+
+# The news job (src/ml/news_data.py) has no operation without a Gemini key,
+# unlike brapi -- so both the secret and the job itself are only created
+# when gemini_api_key is provided.
+resource "google_secret_manager_secret" "gemini_api_key" {
+  count     = var.gemini_api_key != "" ? 1 : 0
+  secret_id = "gemini-api-key"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "gemini_api_key" {
+  count       = var.gemini_api_key != "" ? 1 : 0
+  secret      = google_secret_manager_secret.gemini_api_key[0].id
+  secret_data = var.gemini_api_key
+}
