@@ -440,9 +440,15 @@ def _load_progress(default_year: int, default_month: int) -> tuple[int, int]:
 
 
 def _save_progress(year: int, month: int) -> None:
-    client = _bq_client()
-    client.query(f"DELETE FROM `{_table_ref(PROGRESS_TABLE)}` WHERE TRUE").result()
-    client.insert_rows_json(
+    # Append-only, not delete-then-insert: rows written via the streaming
+    # insert API sit in a buffer for up to ~90 minutes during which
+    # BigQuery flatly refuses any UPDATE/DELETE against the table ("would
+    # affect rows in the streaming buffer") -- a real failure hit in
+    # production, not a hypothetical. _load_progress() already reads the
+    # single most recent row by updated_at, so the table doesn't need to
+    # be kept to one row; it only grows by one tiny row per run (at most
+    # daily), which is nowhere near worth periodic cleanup.
+    _bq_client().insert_rows_json(
         _table_ref(PROGRESS_TABLE),
         [{"year": year, "month": month, "updated_at": datetime.now(timezone.utc).isoformat()}],
     )
