@@ -53,7 +53,15 @@ def load_model(investment_id: str, horizon: str, model_name: str):
 
 def load_all_metadata(investment_id: str, horizon: str) -> list[dict]:
     horizon_dir = _horizon_dir(investment_id, horizon)
-    return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(horizon_dir.glob("*.json"))]
+    # Excludes *.backtest.json sidecars (see save_backtest_result) -- both
+    # live in the same directory and both end in .json, so a bare "*.json"
+    # glob here would silently pull backtest-result dicts (no "metrics"
+    # key) into what every caller assumes is a list of training metadata.
+    return [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(horizon_dir.glob("*.json"))
+        if not path.name.endswith(".backtest.json")
+    ]
 
 
 def best_model_name(investment_id: str, horizon: str, metric: str = "mae") -> str | None:
@@ -65,3 +73,24 @@ def best_model_name(investment_id: str, horizon: str, metric: str = "mae") -> st
     key = (lambda m: m["metrics"][metric])
     best = min(metadata_list, key=key) if lower_is_better else max(metadata_list, key=key)
     return best["model_name"]
+
+
+def save_backtest_result(investment_id: str, horizon: str, model_name: str, result: dict) -> None:
+    """Persists a walk-forward backtest result alongside the model it
+    tested -- previously computed by backtest.py and only ever printed,
+    never saved, so there was no durable record of which (asset, horizon)
+    combos actually showed a real, tradeable edge versus just a
+    statistically significant one. Selection logic (src/ml/selection.py)
+    reads this instead of re-running the backtest every time.
+    """
+    horizon_dir = _horizon_dir(investment_id, horizon)
+    (horizon_dir / f"{model_name}.backtest.json").write_text(
+        json.dumps(result, indent=2), encoding="utf-8"
+    )
+
+
+def load_backtest_result(investment_id: str, horizon: str, model_name: str) -> dict | None:
+    path = _horizon_dir(investment_id, horizon) / f"{model_name}.backtest.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))

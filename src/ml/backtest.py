@@ -23,7 +23,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from src.config.watchlist_loader import load_watchlist
 from src.ml.data import load_price_history, lookup_investment_type
 from src.ml.features import HORIZON_STEPS, build_feature_frame
-from src.ml.storage import load_all_metadata, load_model
+from src.ml.storage import load_all_metadata, load_model, save_backtest_result
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ HORIZONS = ("daily", "weekly", "monthly")
 ROUND_TRIP_COST = 0.002
 
 
-def _choose_model_name(investment_id: str, horizon: str) -> str:
+def choose_model_name(investment_id: str, horizon: str) -> str:
     """The model actually worth backtesting: the non-naive model with the
     best statistically significant directional accuracy, if one exists --
     otherwise there's no real signal to backtest, so fall back to whichever
@@ -65,7 +65,7 @@ def backtest_horizon(investment_id: str, horizon: str, model_name: str | None = 
         history, horizon_days=horizon_days, investment_type=investment_type, investment_id=investment_id
     )
 
-    model_name = model_name or _choose_model_name(investment_id, horizon)
+    model_name = model_name or choose_model_name(investment_id, horizon)
     fitted_model, _metadata = load_model(investment_id, horizon, model_name)
 
     tscv = TimeSeriesSplit(n_splits=N_SPLITS)
@@ -114,6 +114,7 @@ def backtest_horizon(investment_id: str, horizon: str, model_name: str | None = 
         "beats_buy_hold": strategy_cumulative > buy_hold_cumulative,
         "round_trip_cost": ROUND_TRIP_COST,
     }
+    save_backtest_result(investment_id, horizon, model_name, result)
     logger.info(
         "[%s/%s] backtest (%s): strategy=%+.1f%% buy&hold=%+.1f%% over %d blocks (%d trades) -> %s",
         investment_id,

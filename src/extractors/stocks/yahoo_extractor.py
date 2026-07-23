@@ -137,8 +137,22 @@ class YahooFinanceStockExtractor(BaseStockExtractor):
         records = []
         for i, ts in enumerate(timestamps):
             close = closes[i] if i < len(closes) else None
+            open_ = opens[i] if i < len(opens) else None
+            high = highs[i] if i < len(highs) else None
+            low = lows[i] if i < len(lows) else None
             if close is None:
                 # Yahoo emits a null row for non-trading days within the range
+                continue
+            if open_ is None or high is None or low is None:
+                # A still-forming bar for the current session: Yahoo
+                # reports the last traded price as `close` before the
+                # session closes, but open/high/low stay null until it
+                # does. Ingesting this produced a real bug -- a Pydantic/
+                # BigQuery float coercion turned that null into 0.0, so a
+                # live prediction saw close=37 but open=high=low=0, a
+                # feature magnitude no model was trained on, and predicted
+                # a nonsensical -53% single-day return. The finalized bar
+                # shows up in a later run once the session actually closes.
                 continue
             records.append(
                 InvestmentHistoryRecord(
@@ -147,9 +161,9 @@ class YahooFinanceStockExtractor(BaseStockExtractor):
                     investment_id=asset.id,
                     source=self.source,
                     currency=currency,
-                    open=opens[i] if i < len(opens) else None,
-                    high=highs[i] if i < len(highs) else None,
-                    low=lows[i] if i < len(lows) else None,
+                    open=open_,
+                    high=high,
+                    low=low,
                     close=close,
                     volume=volumes[i] if i < len(volumes) else None,
                     extra={
