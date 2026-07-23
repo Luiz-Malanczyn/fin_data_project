@@ -10,6 +10,7 @@ from src.config.company_dimension import get_company
 from src.ml.dividend_data import get_dividend_history
 from src.ml.fundamentals_data import get_fundamentals_history
 from src.ml.macro_data import get_macro_data
+from src.ml.news_data import get_news_sentiment_history
 
 FeatureBuilder = Callable[[pd.DataFrame], pd.DataFrame]
 
@@ -292,6 +293,45 @@ def fundamentals_features(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     return out
 
 
+def news_sentiment_features(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """Daily news sentiment from GDELT articles scored by an LLM for
+    relevance and financial impact (see news_data.py). Exact same-day join
+    on event_date, not an as-of/forward-fill like dividend_features or
+    fundamentals_features: a fundamentals ratio is still true weeks after
+    the filing, but a news event from last week isn't "today's sentiment"
+    -- carrying it forward would manufacture a signal that isn't there.
+
+    Coverage is sparse by construction (real relevant articles found per
+    ticker range from ~40 to ~220 over 11 years of trading days), so a
+    same-day-only feature would be zero on well over 95% of rows. Also
+    add a 7-day trailing rolling average (article-count-weighted, so one
+    strong day isn't diluted the same as a quiet one) to give the model
+    a less starved signal, same rationale as the has_fundamentals flag:
+    missing coverage gets a neutral 0.0 plus an explicit flag rather than
+    dropping the row.
+    """
+    out = pd.DataFrame(index=df.index)
+    news = get_news_sentiment_history(ticker)
+    if news.empty:
+        out["news_sentiment_score"] = 0.0
+        out["news_article_count"] = 0.0
+        out["news_sentiment_7d"] = 0.0
+        out["has_news_coverage"] = 0.0
+        return out
+
+    merged = df[["event_date"]].merge(news, on="event_date", how="left")
+    sentiment = merged["news_sentiment_score"].fillna(0.0)
+    count = merged["n_articles"].fillna(0.0)
+
+    out["news_sentiment_score"] = sentiment.to_numpy()
+    out["news_article_count"] = count.to_numpy()
+    weighted_sum = (sentiment * count).rolling(7, min_periods=1).sum()
+    count_sum = count.rolling(7, min_periods=1).sum()
+    out["news_sentiment_7d"] = (weighted_sum / count_sum.replace(0, np.nan)).fillna(0.0).to_numpy()
+    out["has_news_coverage"] = merged["n_articles"].notna().astype(float).to_numpy()
+    return out
+
+
 # Registered in order; each builder receives the raw OHLCV history frame
 # (event_date, open, high, low, close, volume) and returns the columns it
 # contributes. To bring in more variables later (fundamentals, ...), add a
@@ -365,6 +405,7 @@ def build_feature_frame(
                 yahoo_symbol = f"{investment_id}.SA"
             feature_frames.append(dividend_features(df, yahoo_symbol))
             feature_frames.append(fundamentals_features(df, investment_id))
+            feature_frames.append(news_sentiment_features(df, investment_id))
     features = pd.concat(feature_frames, axis=1)
     # A handful of features are ratios (volume_change_1d, macro returns);
     # a zero-volume illiquid day or similar upstream glitch can turn one of
