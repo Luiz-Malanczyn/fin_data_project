@@ -62,3 +62,9 @@ variable "news_schedule" {
   type        = string
   default     = "30 6 * * *"
 }
+
+variable "recommendations_schedule" {
+  description = "Cron for the daily recommendation refresh. Default: 30 minutes after the default stocks_schedule (22:00 BRT), so it always runs against a fresh close."
+  type        = string
+  default     = "30 22 * * 1-5"
+}

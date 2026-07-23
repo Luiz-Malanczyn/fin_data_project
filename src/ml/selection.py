@@ -13,10 +13,96 @@ predictions with unknown reliability.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+from google.cloud import bigquery
+
+from src.config.settings import settings
 from src.config.watchlist_loader import load_watchlist
 from src.ml.backtest import HORIZONS, choose_model_name
 from src.ml.predict import predict_horizon
 from src.ml.storage import load_backtest_result
+
+RECOMMENDATIONS_TABLE = "daily_recommendations"
+
+_RECOMMENDATIONS_SCHEMA = [
+    bigquery.SchemaField("run_at", "TIMESTAMP", mode="REQUIRED"),
+    bigquery.SchemaField("investment_id", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("horizon", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("model_name", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("direction", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("last_known_date", "DATE"),
+    bigquery.SchemaField("last_known_close", "FLOAT64"),
+    bigquery.SchemaField("target_date", "DATE"),
+    bigquery.SchemaField("predicted_close", "FLOAT64"),
+    bigquery.SchemaField("predicted_change_pct", "FLOAT64"),
+    bigquery.SchemaField("backtest_strategy_return", "FLOAT64"),
+    bigquery.SchemaField("backtest_buy_hold_return", "FLOAT64"),
+    bigquery.SchemaField("backtest_n_trades", "INT64"),
+    bigquery.SchemaField("backtest_n_blocks", "INT64"),
+]
+
+
+def _bq_client() -> bigquery.Client:
+    return bigquery.Client(project=settings.gcp_project or None)
+
+
+def _table_ref() -> str:
+    return f"{settings.gcp_project}.{settings.bq_dataset}.{RECOMMENDATIONS_TABLE}"
+
+
+def _ensure_recommendations_table() -> None:
+    table = bigquery.Table(_table_ref(), schema=_RECOMMENDATIONS_SCHEMA)
+    _bq_client().create_table(table, exists_ok=True)
+
+
+def save_recommendations(recommendations: list[dict]) -> None:
+    """Appends one row per recommendation, tagged with when the run
+    happened -- append-only like news_backfill_progress (see news_data.py
+    for why: BigQuery refuses UPDATE/DELETE on rows still in the streaming
+    buffer, up to ~90 minutes after insert, so there's nothing to gain
+    from trying to overwrite "yesterday's" row instead of just adding a
+    new one). Readers should filter to MAX(run_at) for the latest state,
+    same pattern as news_backfill_progress's checkpoint read.
+    """
+    if not recommendations:
+        return
+    run_at = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {
+            "run_at": run_at,
+            "investment_id": r["investment_id"],
+            "horizon": r["horizon"],
+            "model_name": r["model_name"],
+            "direction": r["direction"],
+            "last_known_date": r["last_known_date"],
+            "last_known_close": r["last_known_close"],
+            "target_date": r["target_date"],
+            "predicted_close": r["predicted_close"],
+            "predicted_change_pct": r["predicted_change_pct"],
+            "backtest_strategy_return": r["backtest_strategy_return"],
+            "backtest_buy_hold_return": r["backtest_buy_hold_return"],
+            "backtest_n_trades": r["backtest_n_trades"],
+            "backtest_n_blocks": r["backtest_n_blocks"],
+        }
+        for r in recommendations
+    ]
+    errors = _bq_client().insert_rows_json(_table_ref(), rows)
+    if errors:
+        raise RuntimeError(f"BigQuery insert errors saving recommendations: {errors}")
+
+
+def run_daily_recommendations(min_trades: int = 10) -> list[dict]:
+    """Entry point for the daily Cloud Run Job: regenerate today's
+    recommendations from the currently-saved models (no retraining --
+    just a fresh live prediction against today's price data) and persist
+    them, so anyone can read the latest run from BigQuery instead of
+    needing this script run interactively.
+    """
+    _ensure_recommendations_table()
+    recommendations = get_recommendations(min_trades=min_trades)
+    save_recommendations(recommendations)
+    return recommendations
 
 
 def get_qualified_combos(min_trades: int = 10) -> list[dict]:
@@ -49,6 +135,8 @@ def get_recommendations(min_trades: int = 10) -> list[dict]:
     acted on, instead of the full 39-combo grid where most entries have
     no demonstrated edge behind them.
     """
+    import gc
+
     recommendations = []
     for combo in get_qualified_combos(min_trades=min_trades):
         pred = predict_horizon(combo["investment_id"], combo["horizon"], combo["model_name"])
@@ -62,6 +150,16 @@ def get_recommendations(min_trades: int = 10) -> list[dict]:
                 "backtest_n_blocks": combo["n_blocks"],
             }
         )
+        # predict_horizon() pulls a ticker's *entire* price history plus
+        # macro/fundamentals/news joins into pandas DataFrames and
+        # deserializes a fresh model (some are multi-estimator tree
+        # ensembles) on every call, none of which gets released between
+        # combos on its own -- across 11 sequential predictions that was
+        # enough to OOM-kill the Cloud Run job even at 2Gi, well past
+        # what a single combo needs. Forcing collection here trades a
+        # little time for not accumulating 11 combos' worth of live data
+        # at once.
+        gc.collect()
     recommendations.sort(key=lambda r: -r["backtest_strategy_return"])
     return recommendations
 
@@ -70,7 +168,7 @@ if __name__ == "__main__":
     import logging
 
     logging.basicConfig(level=logging.WARNING)
-    for rec in get_recommendations():
+    for rec in run_daily_recommendations():
         print(
             f"{rec['investment_id']:6s} {rec['horizon']:8s} {rec['direction']:6s} "
             f"previsto={rec['predicted_change_pct']:+.2f}% "

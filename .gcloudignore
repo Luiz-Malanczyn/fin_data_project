@@ -1,0 +1,15 @@
+.git/
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/
+*.egg-info/
+.env
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+terraform.tfvars
+*.tfplan
+.claude/

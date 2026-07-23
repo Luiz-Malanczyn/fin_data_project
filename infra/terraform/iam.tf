@@ -66,3 +66,11 @@ resource "google_cloud_run_v2_job_iam_member" "scheduler_can_run_news" {
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.scheduler_invoker.email}"
 }
+
+resource "google_cloud_run_v2_job_iam_member" "scheduler_can_run_recommendations" {
+  project  = google_cloud_run_v2_job.recommendations_pipeline.project
+  location = google_cloud_run_v2_job.recommendations_pipeline.location
+  name     = google_cloud_run_v2_job.recommendations_pipeline.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.scheduler_invoker.email}"
+}

@@ -113,3 +113,56 @@ resource "google_cloud_run_v2_job" "news_pipeline" {
     }
   }
 }
+
+# Daily recommendation refresh (see src/ml/selection.py): re-runs today's
+# live prediction for whichever (asset, horizon) combos have a persisted,
+# backtest-proven track record, using the models already baked into the
+# image (see Dockerfile's `COPY models ./models` and .gcloudignore, which
+# deliberately does NOT exclude the local models/ directory the way
+# .gitignore does -- Cloud Run Jobs are stateless containers, so the
+# trained model files have to travel with the image or the job has
+# nothing to predict with). No retraining happens here; it needs
+# fin-data-stocks to have already run so today's close price is in
+# BigQuery, hence the later schedule.
+resource "google_cloud_run_v2_job" "recommendations_pipeline" {
+  name     = "fin-data-recommendations"
+  location = var.region
+
+  template {
+    template {
+      service_account = google_service_account.pipelines_runtime.email
+      max_retries      = 1
+      timeout          = "1800s"
+
+      containers {
+        image = var.image
+        args  = ["recommendations"]
+
+        # Cloud Run Jobs default to 512Mi, which OOM-killed this job in
+        # practice (signal 9). 1Gi still wasn't enough -- deserialized
+        # tree-ensemble models (RandomForest/GradientBoosting/XGBoost)
+        # take up meaningfully more memory than their ~63MB on-disk size,
+        # and nothing in the prediction loop frees a combo's live feature
+        # frame (full price history joined against macro/fundamentals/
+        # news data) before moving to the next of 11 sequential
+        # predictions, so usage climbs across the run rather than peaking
+        # once. 2Gi is a generous, cheap margin for a job that runs a few
+        # minutes once a day.
+        resources {
+          limits = {
+            cpu    = "1000m"
+            memory = "4Gi"
+          }
+        }
+
+        dynamic "env" {
+          for_each = local.common_env
+          content {
+            name  = env.value.name
+            value = env.value.value
+          }
+        }
+      }
+    }
+  }
+}

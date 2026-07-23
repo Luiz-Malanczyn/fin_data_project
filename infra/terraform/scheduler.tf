@@ -30,6 +30,22 @@ resource "google_cloud_scheduler_job" "crypto_schedule" {
   }
 }
 
+resource "google_cloud_scheduler_job" "recommendations_schedule" {
+  name      = "fin-data-recommendations-schedule"
+  region    = var.region
+  schedule  = var.recommendations_schedule
+  time_zone = "America/Sao_Paulo"
+
+  http_target {
+    http_method = "POST"
+    uri         = "https://${var.region}-run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/${google_cloud_run_v2_job.recommendations_pipeline.name}:run"
+
+    oauth_token {
+      service_account_email = google_service_account.scheduler_invoker.email
+    }
+  }
+}
+
 resource "google_cloud_scheduler_job" "news_schedule" {
   count     = var.gemini_api_key != "" ? 1 : 0
   name      = "fin-data-news-schedule"
