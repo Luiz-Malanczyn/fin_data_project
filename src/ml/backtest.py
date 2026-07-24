@@ -56,6 +56,94 @@ def choose_model_name(investment_id: str, horizon: str) -> str:
     return min(all_metadata, key=lambda m: m["metrics"]["mae"])["model_name"]
 
 
+def significant_model_names(investment_id: str, horizon: str) -> list[str]:
+    all_metadata = load_all_metadata(investment_id, horizon)
+    return [
+        m["model_name"]
+        for m in all_metadata
+        if not m["model_name"].startswith("naive") and m["metrics"]["directional_accuracy_significant"]
+    ]
+
+
+def backtest_ensemble(investment_id: str, horizon: str) -> dict | None:
+    """Same walk-forward discipline as backtest_horizon, but trades on the
+    average predicted return across every statistically significant model
+    instead of just the single best one -- testing whether combining
+    several imperfect-but-real signals cancels out enough noise to turn
+    more combos profitable. Returns None when there's nothing to ensemble
+    (fewer than 2 significant models for this combo).
+    """
+    model_names = significant_model_names(investment_id, horizon)
+    if len(model_names) < 2:
+        return None
+
+    investment_type = lookup_investment_type(investment_id)
+    horizon_days = HORIZON_STEPS[investment_type][horizon]
+
+    history = load_price_history(investment_id, investment_type)
+    X, y, _live_row = build_feature_frame(
+        history, horizon_days=horizon_days, investment_type=investment_type, investment_id=investment_id
+    )
+
+    fitted_models = {name: load_model(investment_id, horizon, name)[0] for name in model_names}
+
+    tscv = TimeSeriesSplit(n_splits=N_SPLITS)
+    strategy_returns: list[float] = []
+    buy_hold_returns: list[float] = []
+    n_trades = 0
+
+    for train_idx, test_idx in tscv.split(X):
+        fold_models = {
+            name: clone(model).fit(X.iloc[train_idx], y.iloc[train_idx]) for name, model in fitted_models.items()
+        }
+
+        for block_start in range(0, len(test_idx), horizon_days):
+            block_idx = test_idx[block_start : block_start + horizon_days]
+            if len(block_idx) == 0:
+                continue
+            i = block_idx[0]
+            predicted_return = float(np.mean([m.predict(X.iloc[[i]])[0] for m in fold_models.values()]))
+            actual_return = float(y.iloc[i])
+
+            buy_hold_returns.append(actual_return)
+            if predicted_return > 0:
+                strategy_returns.append(actual_return - ROUND_TRIP_COST)
+                n_trades += 1
+            else:
+                strategy_returns.append(0.0)
+
+    strategy_cumulative = float(np.prod([1 + r for r in strategy_returns]) - 1)
+    buy_hold_cumulative = float(np.prod([1 + r for r in buy_hold_returns]) - 1)
+    winning_trades = sum(1 for r in strategy_returns if r > 0)
+
+    result = {
+        "investment_id": investment_id,
+        "horizon": horizon,
+        "model_name": "ensemble",
+        "member_models": model_names,
+        "n_blocks": len(strategy_returns),
+        "n_trades": n_trades,
+        "win_rate": winning_trades / n_trades if n_trades else 0.0,
+        "strategy_cumulative_return": strategy_cumulative,
+        "buy_hold_cumulative_return": buy_hold_cumulative,
+        "beats_buy_hold": strategy_cumulative > buy_hold_cumulative,
+        "round_trip_cost": ROUND_TRIP_COST,
+    }
+    save_backtest_result(investment_id, horizon, "ensemble", result)
+    logger.info(
+        "[%s/%s] backtest (ensemble of %s): strategy=%+.1f%% buy&hold=%+.1f%% over %d blocks (%d trades) -> %s",
+        investment_id,
+        horizon,
+        "+".join(model_names),
+        strategy_cumulative * 100,
+        buy_hold_cumulative * 100,
+        result["n_blocks"],
+        n_trades,
+        "beats buy & hold" if result["beats_buy_hold"] else "does not beat buy & hold",
+    )
+    return result
+
+
 def backtest_horizon(investment_id: str, horizon: str, model_name: str | None = None) -> dict:
     investment_type = lookup_investment_type(investment_id)
     horizon_days = HORIZON_STEPS[investment_type][horizon]
@@ -135,6 +223,21 @@ def backtest_all_active_assets() -> list[dict]:
     for asset in assets:
         for horizon in HORIZONS:
             results.append(backtest_horizon(asset.id, horizon))
+    return results
+
+
+def backtest_ensemble_all_active_assets() -> list[dict]:
+    """Same sweep as backtest_all_active_assets, but for the ensemble
+    variant -- a no-op (returns None, nothing saved) for any combo with
+    fewer than 2 statistically significant models to combine.
+    """
+    assets = [a for a in load_watchlist() if a.active]
+    results = []
+    for asset in assets:
+        for horizon in HORIZONS:
+            result = backtest_ensemble(asset.id, horizon)
+            if result is not None:
+                results.append(result)
     return results
 
 

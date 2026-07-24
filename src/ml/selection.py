@@ -13,6 +13,7 @@ predictions with unknown reliability.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from google.cloud import bigquery
@@ -20,8 +21,11 @@ from google.cloud import bigquery
 from src.config.settings import settings
 from src.config.watchlist_loader import load_watchlist
 from src.ml.backtest import HORIZONS, choose_model_name
-from src.ml.predict import predict_horizon
+from src.ml.evaluation import evaluate_matured_predictions
+from src.ml.predict import predict_ensemble, predict_horizon
 from src.ml.storage import load_backtest_result
+
+logger = logging.getLogger(__name__)
 
 RECOMMENDATIONS_TABLE = "daily_recommendations"
 
@@ -93,12 +97,21 @@ def save_recommendations(recommendations: list[dict]) -> None:
 
 
 def run_daily_recommendations(min_trades: int = 10) -> list[dict]:
-    """Entry point for the daily Cloud Run Job: regenerate today's
-    recommendations from the currently-saved models (no retraining --
-    just a fresh live prediction against today's price data) and persist
-    them, so anyone can read the latest run from BigQuery instead of
-    needing this script run interactively.
+    """Entry point for the daily Cloud Run Job: score yesterday's (or
+    older) predictions against what actually happened once their
+    target_date has arrived, then regenerate today's recommendations from
+    the currently-saved models (no retraining -- just a fresh live
+    prediction against today's price data) and persist both, so anyone
+    can read the latest state from BigQuery instead of needing this
+    script run interactively. Evaluation runs first and is best-effort:
+    a bug there shouldn't block today's recommendations from being saved.
     """
+    try:
+        evaluated = evaluate_matured_predictions()
+        logger.info("Evaluated %d matured predictions", len(evaluated))
+    except Exception:
+        logger.exception("Evaluating matured predictions failed; continuing with today's recommendations")
+
     _ensure_recommendations_table()
     recommendations = get_recommendations(min_trades=min_trades)
     save_recommendations(recommendations)
@@ -106,11 +119,20 @@ def run_daily_recommendations(min_trades: int = 10) -> list[dict]:
 
 
 def get_qualified_combos(min_trades: int = 10) -> list[dict]:
-    """(asset, horizon) combos where the walk-forward backtest of the
-    model actually chosen for trading (the best statistically significant
-    model, or a naive fallback that by construction can't beat buy-and-
-    hold) beat buy-and-hold, with enough trades behind it that it isn't a
-    fluke from a handful of lucky calls.
+    """(asset, horizon) combos where the best available backtested
+    strategy beat buy-and-hold, with enough trades behind it that it
+    isn't a fluke from a handful of lucky calls.
+
+    "Best available" compares the single best statistically significant
+    model against the ensemble of all significant models for that combo
+    (see backtest.backtest_ensemble) when both have a persisted backtest
+    result, and keeps whichever scored the higher walk-forward return --
+    an experiment found the ensemble beats the single model in roughly a
+    third of combos that have 2+ significant models to combine, and pushes
+    a couple of combos over the beats_buy_hold line that the single model
+    alone didn't reach. Since both share the same buy-and-hold reference
+    (same asset, same horizon, same backtest folds), comparing their raw
+    strategy_cumulative_return is enough to know which one also beats it.
 
     Requires a persisted backtest result (src.ml.backtest must have run
     and saved one via storage.save_backtest_result) -- combos with none
@@ -121,11 +143,19 @@ def get_qualified_combos(min_trades: int = 10) -> list[dict]:
     for asset in assets:
         for horizon in HORIZONS:
             model_name = choose_model_name(asset.id, horizon)
-            result = load_backtest_result(asset.id, horizon, model_name)
-            if result is None:
+            candidates = [
+                r
+                for r in (
+                    load_backtest_result(asset.id, horizon, model_name),
+                    load_backtest_result(asset.id, horizon, "ensemble"),
+                )
+                if r is not None
+            ]
+            if not candidates:
                 continue
-            if result["beats_buy_hold"] and result["n_trades"] >= min_trades:
-                qualified.append(result)
+            best = max(candidates, key=lambda r: r["strategy_cumulative_return"])
+            if best["beats_buy_hold"] and best["n_trades"] >= min_trades:
+                qualified.append(best)
     return qualified
 
 
@@ -139,7 +169,10 @@ def get_recommendations(min_trades: int = 10) -> list[dict]:
 
     recommendations = []
     for combo in get_qualified_combos(min_trades=min_trades):
-        pred = predict_horizon(combo["investment_id"], combo["horizon"], combo["model_name"])
+        if combo["model_name"] == "ensemble":
+            pred = predict_ensemble(combo["investment_id"], combo["horizon"], combo["member_models"])
+        else:
+            pred = predict_horizon(combo["investment_id"], combo["horizon"], combo["model_name"])
         recommendations.append(
             {
                 **pred,

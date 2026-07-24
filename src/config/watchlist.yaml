@@ -115,6 +115,14 @@ assets:
       range: 5d
       interval: 1d
 
+  # ML note: 0/3 horizons ever produced a statistically significant
+  # directional model (see src/ml/backtest.py), even after adding
+  # fundamentals/dividend/news features to the stock assets above --
+  # none of those apply to crypto, so this asset has effectively no
+  # feature set built for it yet. Left active for price collection
+  # (independent of ML) and future crypto-specific feature work
+  # (on-chain metrics, funding rates), but don't expect it to show up
+  # in daily_recommendations without new features.
   - id: bitcoin
     type: crypto
     source: binance

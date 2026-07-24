@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 HORIZONS = ("daily", "weekly", "monthly")
 
 
-def predict_horizon(investment_id: str, horizon: str, model_name: str | None = None) -> dict:
+def _live_row_for(investment_id: str, horizon: str):
     investment_type = lookup_investment_type(investment_id)
     horizon_days = HORIZON_STEPS[investment_type][horizon]
 
@@ -28,13 +28,13 @@ def predict_horizon(investment_id: str, horizon: str, model_name: str | None = N
     _X, _y, live_row = build_feature_frame(
         history, horizon_days=horizon_days, investment_type=investment_type, investment_id=investment_id
     )
+    last_known_date = history["event_date"].max().date()
+    last_known_close = float(live_row["close_lag_0"].iloc[0])
+    target_date = target_date_for_horizon(last_known_date, investment_type, horizon)
+    return investment_type, live_row, last_known_date, last_known_close, target_date
 
-    model_name = model_name or best_model_name(investment_id, horizon)
-    if model_name is None:
-        raise RuntimeError(
-            f"No trained model found for {investment_id!r}/{horizon!r}. Run src.ml.train first."
-        )
 
+def _predict_return_with(investment_id: str, horizon: str, model_name: str, live_row) -> float:
     model, metadata = load_model(investment_id, horizon, model_name)
 
     # Guards against silently predicting with a model trained on a
@@ -49,12 +49,23 @@ def predict_horizon(investment_id: str, horizon: str, model_name: str | None = N
         )
 
     # Models are fit on the return over the horizon, not the raw future
-    # price (see build_feature_frame) -- convert back to price here.
-    predicted_return = float(model.predict(live_row)[0])
-    last_known_date = history["event_date"].max().date()
-    last_known_close = float(live_row["close_lag_0"].iloc[0])
+    # price (see build_feature_frame) -- convert back to price by the caller.
+    return float(model.predict(live_row)[0])
+
+
+def predict_horizon(investment_id: str, horizon: str, model_name: str | None = None) -> dict:
+    investment_type, live_row, last_known_date, last_known_close, target_date = _live_row_for(
+        investment_id, horizon
+    )
+
+    model_name = model_name or best_model_name(investment_id, horizon)
+    if model_name is None:
+        raise RuntimeError(
+            f"No trained model found for {investment_id!r}/{horizon!r}. Run src.ml.train first."
+        )
+
+    predicted_return = _predict_return_with(investment_id, horizon, model_name, live_row)
     predicted_close = last_known_close * (1 + predicted_return)
-    target_date = target_date_for_horizon(last_known_date, investment_type, horizon)
 
     result = {
         "investment_id": investment_id,
@@ -72,6 +83,47 @@ def predict_horizon(investment_id: str, horizon: str, model_name: str | None = N
         investment_id,
         horizon,
         model_name,
+        result["last_known_date"],
+        last_known_close,
+        result["target_date"],
+        predicted_close,
+        result["predicted_change_pct"],
+    )
+    return result
+
+
+def predict_ensemble(investment_id: str, horizon: str, model_names: list[str]) -> dict:
+    """Same shape as predict_horizon, but averages the predicted return
+    across every model in `model_names` instead of using one -- the live
+    counterpart of backtest.backtest_ensemble, used when the ensemble beat
+    the single best model in that backtest (see selection.get_qualified_combos).
+    """
+    investment_type, live_row, last_known_date, last_known_close, target_date = _live_row_for(
+        investment_id, horizon
+    )
+
+    predicted_returns = [
+        _predict_return_with(investment_id, horizon, model_name, live_row) for model_name in model_names
+    ]
+    predicted_return = sum(predicted_returns) / len(predicted_returns)
+    predicted_close = last_known_close * (1 + predicted_return)
+
+    result = {
+        "investment_id": investment_id,
+        "investment_type": investment_type,
+        "horizon": horizon,
+        "model_name": "ensemble",
+        "last_known_date": last_known_date.isoformat(),
+        "last_known_close": last_known_close,
+        "target_date": target_date.isoformat(),
+        "predicted_close": predicted_close,
+        "predicted_change_pct": predicted_return * 100,
+    }
+    logger.info(
+        "[%s/%s] ensemble(%s): %s close=%.2f -> predicted %s close=%.2f (%+.2f%%)",
+        investment_id,
+        horizon,
+        "+".join(model_names),
         result["last_known_date"],
         last_known_close,
         result["target_date"],
